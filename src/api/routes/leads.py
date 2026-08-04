@@ -11,14 +11,8 @@ router = APIRouter()
     response_model=LeadResponse,
     status_code=201,
     summary="Capture Lead",
-    description="""
-Capture a lead — someone interested but not ready to book a session yet.
-
-📋 **Fill in name, email, phone, and an optional interest note**
-
-⏳ **Note:** DynamoDB write is not yet implemented — this currently returns a mock
-response so the API contract is locked in before infrastructure is built.
-""",
+    description="Capture someone interested but not ready to book yet. "
+                "DynamoDB write is TODO until infrastructure/template.yaml is deployed.",
 )
 async def create_lead(request: LeadRequest):
     # TODO: write to debos-boxing-leads table once infrastructure/template.yaml is deployed

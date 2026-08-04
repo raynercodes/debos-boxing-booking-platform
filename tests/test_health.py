@@ -9,4 +9,4 @@ def test_health_check():
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "healthy"
-    assert body["service"] == "debos-boxing-api"
+    assert body["service"] == "debos-boxing-and-booking-platform"

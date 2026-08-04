@@ -1,0 +1,4 @@
+-r requirements.txt
+pytest==8.3.3
+moto==5.0.16
+httpx==0.27.2

@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 router = APIRouter()
 
 
-@router.get("", summary="Health Check")
+@router.get("/", summary="Health Check")
 async def health_check():
     """Basic liveness check — confirms the Lambda is running and responsive."""
     return {

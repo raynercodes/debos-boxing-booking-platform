@@ -55,3 +55,9 @@ sam deploy --profile debos-boxing
 - [ ] SES setup
 - [ ] EventBridge reminder job
 - [ ] Framer frontend integration
+
+## License
+
+Client engagement built and maintained by RaynerCodes Cloud Solutions for
+Debo's Boxing and Fitness. Not licensed for reuse, redistribution, or
+deployment by parties outside this engagement.

@@ -95,7 +95,7 @@ class BookingRepository:
             logger.error("Failed to query bookings for %s: %s", session_date, exc, exc_info=True)
             raise ExternalServiceError("Unable to retrieve bookings") from exc
 
-    def cancel(self, booking_id: str) -> dict:
+    def cancel(self, booking_id: str, reason: str) -> dict:
         """Atomically cancels a booking, but ONLY if it exists AND isn't
         already cancelled — both checks happen in ONE ConditionExpression,
         not as a separate get-then-update pair of calls. That matters for
@@ -111,16 +111,22 @@ class BookingRepository:
         only that the condition failed overall — so on failure, a follow-up
         get_item disambiguates "doesn't exist" from "already cancelled"
         purely to return a precise error message. The write path itself
-        (the common, successful case) is still a single atomic call."""
+        (the common, successful case) is still a single atomic call.
+
+        `reason` is always a real string by the time it reaches here — the
+        route layer already substitutes DEFAULT_CANCELLATION_REASON if the
+        admin didn't type one, so this method never has to think about
+        None/blank handling itself."""
         try:
             result = self._db.bookings_table.update_item(
                 Key={"booking_id": booking_id},
-                UpdateExpression="SET #s = :new_status",
+                UpdateExpression="SET #s = :new_status, cancellation_reason = :reason",
                 ConditionExpression="attribute_exists(booking_id) AND #s <> :cancelled_status",
                 ExpressionAttributeNames={"#s": "status"},
                 ExpressionAttributeValues={
                     ":new_status": "cancelled",
                     ":cancelled_status": "cancelled",
+                    ":reason": reason,
                 },
                 ReturnValues="ALL_NEW",
             )

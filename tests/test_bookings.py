@@ -299,6 +299,39 @@ def test_cancel_booking_admin(mock_aws_infra, admin_token, mock_stripe_checkout)
     assert response.json()["status"] == "cancelled"
 
 
+def test_cancel_booking_without_reason_uses_default(mock_aws_infra, admin_token, mock_stripe_checkout):
+    """No body sent at all — should fall back to the documented default,
+    not a blank/null value."""
+    created = client.post("/bookings/", json=_booking_payload(BookingType.genes_kids)).json()
+    response = client.patch(
+        f"/bookings/{created['booking_id']}/cancel",
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert response.json()["cancellation_reason"] == "No reason was mentioned by Debo"
+
+
+def test_cancel_booking_with_blank_reason_uses_default(mock_aws_infra, admin_token, mock_stripe_checkout):
+    """An explicitly blank/whitespace reason should be treated the same as
+    not sending one at all — not stored as an empty string."""
+    created = client.post("/bookings/", json=_booking_payload(BookingType.genes_kids)).json()
+    response = client.patch(
+        f"/bookings/{created['booking_id']}/cancel",
+        json={"reason": "   "},
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert response.json()["cancellation_reason"] == "No reason was mentioned by Debo"
+
+
+def test_cancel_booking_with_custom_reason_is_stored(mock_aws_infra, admin_token, mock_stripe_checkout):
+    created = client.post("/bookings/", json=_booking_payload(BookingType.genes_kids)).json()
+    response = client.patch(
+        f"/bookings/{created['booking_id']}/cancel",
+        json={"reason": "Debo is sick today"},
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert response.json()["cancellation_reason"] == "Debo is sick today"
+
+
 def test_cancel_already_cancelled_booking_rejected(mock_aws_infra, admin_token, mock_stripe_checkout):
     created = client.post("/bookings/", json=_booking_payload(BookingType.genes_kids)).json()
     headers = {"Authorization": f"Bearer {admin_token}"}

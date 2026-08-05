@@ -1,7 +1,7 @@
 import re
 from datetime import datetime
 from enum import Enum
-from typing import ClassVar, Dict, Set, Tuple
+from typing import ClassVar, Dict, Set, Tuple, Optional
 
 from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
 
@@ -228,6 +228,7 @@ class BookingResponse(BaseModel):
     status: BookingStatus
     created_at: str
     reminder_sent: bool
+    cancellation_reason: Optional[str] = None  # only ever populated once cancelled
 
 
 class BookingCheckoutResponse(BaseModel):

@@ -4,6 +4,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Optional, List
 from fastapi import APIRouter, Depends, Query
 from fastapi.security import HTTPBearer
+from pydantic import BaseModel
 
 from src.api.models.booking import (
     BookingRequest, BookingResponse, BookingCheckoutResponse, BookingStatus,
@@ -20,7 +21,14 @@ logger = get_logger(__name__)
 router = APIRouter()
 bearer_scheme = HTTPBearer()
 
-VALID_DAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+# Weekends deliberately excluded — no BookingType's allowed_weekdays ever
+# includes Saturday/Sunday (Personal is Mon-Fri, the widest of the three),
+# so a day_of_week filter value of "saturday" would always return an empty
+# result. This isn't the actual defense against weekend bookings — that
+# lives in booking.py's schedule validator, checked against real weekday
+# integers independent of this list. This is just removing dead, unused
+# input surface from an admin-only query param.
+VALID_DAYS = ["monday", "tuesday", "wednesday", "thursday", "friday"]
 
 # How long a booking stays visible in the admin list after its start time has
 # passed. Deliberately a DISPLAY filter applied at query time, NOT a deletion
@@ -32,6 +40,21 @@ VALID_DAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday"
 # evaluation in application code, every time, is the only way to guarantee
 # this window actually holds.
 HISTORY_VISIBILITY_WINDOW = timedelta(hours=1)
+
+# Shown on the booking record (and eventually in the cancellation email to
+# both Debo and the client) whenever the admin cancels without typing a
+# reason. Kept as a named constant rather than an inline string so there's
+# exactly one place to change the wording later.
+DEFAULT_CANCELLATION_REASON = "No reason was mentioned by Debo"
+
+
+class CancelBookingRequest(BaseModel):
+    """Optional request body for the cancel endpoint — admin can type a
+    reason, or send nothing at all and DEFAULT_CANCELLATION_REASON gets
+    used instead. Kept optional (not required) since forcing a reason on
+    every cancellation would just encourage typing throwaway text to get
+    past a required field, which defeats the point of collecting it."""
+    reason: Optional[str] = None
 
 
 class BookingNotFoundError(AppError):
@@ -95,6 +118,7 @@ def _item_to_response(item: dict) -> BookingResponse:
         status=item["status"],
         created_at=item["created_at"],
         reminder_sent=item["reminder_sent"],
+        cancellation_reason=item.get("cancellation_reason"),  # only present once cancelled
     )
 
 
@@ -284,10 +308,15 @@ async def get_booking(booking_id: str):
                 "close it is to the session start.",
     dependencies=[Depends(require_admin)],
 )
-async def cancel_booking(booking_id: str):
+async def cancel_booking(booking_id: str, request: Optional[CancelBookingRequest] = None):
+    # Blank/whitespace-only reason treated the same as "no reason given" —
+    # an admin submitting an empty string shouldn't produce a blank-looking
+    # record; it should fall through to the same default as sending nothing.
+    reason = (request.reason.strip() if request and request.reason else "") or DEFAULT_CANCELLATION_REASON
+
     # Atomic cancel — see BookingRepository.cancel docstring for why this is
     # ONE conditional write rather than a separate check-then-update pair.
-    result = _get_repository().cancel(booking_id)
+    result = _get_repository().cancel(booking_id, reason)
 
     if result["outcome"] == "not_found":
         raise BookingNotFoundError(f"Booking {booking_id} not found")
@@ -321,6 +350,8 @@ async def cancel_booking(booking_id: str):
     # cancellation — one to Debo confirming the cancellation happened, and
     # one to the original booker (client) notifying them their session was
     # cancelled. Both emails belong HERE, only on the "cancelled" outcome
-    # above, never on the "already_cancelled" rejection path.
-    logger.info("Booking %s cancelled by admin", booking_id)
+    # above, never on the "already_cancelled" rejection path. The `reason`
+    # captured above (typed by Debo, or DEFAULT_CANCELLATION_REASON if he
+    # didn't provide one) belongs in BOTH email bodies once that's wired in.
+    logger.info("Booking %s cancelled by admin (reason: %s)", booking_id, reason)
     return _item_to_response(item)

@@ -10,3 +10,5 @@ package/*
 *.egg-info/
 .DS_Store
 samconfig.toml
+*_update.sh
+setup_repo.sh

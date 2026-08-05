@@ -45,7 +45,7 @@ HISTORY_VISIBILITY_WINDOW = timedelta(hours=1)
 # both Debo and the client) whenever the admin cancels without typing a
 # reason. Kept as a named constant rather than an inline string so there's
 # exactly one place to change the wording later.
-DEFAULT_CANCELLATION_REASON = "No reason was mentioned by Debo"
+DEFAULT_CANCELLATION_REASON = "No reason was mentioned by Debo — contact him for more information."
 
 
 class CancelBookingRequest(BaseModel):

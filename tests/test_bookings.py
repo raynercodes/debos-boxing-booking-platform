@@ -307,7 +307,7 @@ def test_cancel_booking_without_reason_uses_default(mock_aws_infra, admin_token,
         f"/bookings/{created['booking_id']}/cancel",
         headers={"Authorization": f"Bearer {admin_token}"},
     )
-    assert response.json()["cancellation_reason"] == "No reason was mentioned by Debo"
+    assert response.json()["cancellation_reason"] == "No reason was mentioned by Debo — contact him for more information."
 
 
 def test_cancel_booking_with_blank_reason_uses_default(mock_aws_infra, admin_token, mock_stripe_checkout):
@@ -319,7 +319,7 @@ def test_cancel_booking_with_blank_reason_uses_default(mock_aws_infra, admin_tok
         json={"reason": "   "},
         headers={"Authorization": f"Bearer {admin_token}"},
     )
-    assert response.json()["cancellation_reason"] == "No reason was mentioned by Debo"
+    assert response.json()["cancellation_reason"] == "No reason was mentioned by Debo — contact him for more information."
 
 
 def test_cancel_booking_with_custom_reason_is_stored(mock_aws_infra, admin_token, mock_stripe_checkout):

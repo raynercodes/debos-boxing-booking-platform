@@ -298,13 +298,24 @@ async def cancel_booking(booking_id: str):
 
     item = result["item"]
 
-    # Cancelling a Personal booking must ALSO release its slot claim — a
-    # confirmed Personal slot's claim persists specifically to block that
-    # date+time; if we cancelled the booking but left the claim in place,
-    # that time would stay permanently unbookable even though it's actually
-    # free again.
-    if requires_slot_claim(item["booking_type"]):
-        _get_repository().release_slot(item["session_date"], item["session_time"])
+    # DELIBERATE BUSINESS DECISION — the slot claim is NOT released on
+    # cancellation. If Debo manually cancels a Personal session, that's
+    # almost always for a real reason (unavailable, emergency, etc.), and
+    # the exact date+time shouldn't be instantly re-bookable by a stranger
+    # without him actively re-opening it. This only affects the ONE
+    # specific calendar date+time that was cancelled — slot claims are keyed
+    # by exact (date, time), not a recurring weekly pattern, so cancelling
+    # Aug 10 at 10am has zero effect on future weeks' Mondays at 10am.
+    #
+    # Refunds are handled the same way, on purpose — manually, by Debo,
+    # directly in Stripe's own dashboard, NOT automated by this system.
+    # Automating real refunds correctly means handling partial refunds,
+    # preventing double-refunds, and listening for another webhook event
+    # (charge.refunded) — real complexity that isn't worth it at this
+    # scale (~20 clients/day). A human doing it in Stripe's already-safe,
+    # already-built refund UI is both less code and less risk than custom
+    # refund logic here. Revisit only if this ever becomes a much higher-
+    # volume storefront where manual refund handling stops scaling.
 
     # TODO (future, once SES is wired in): send TWO emails on successful
     # cancellation — one to Debo confirming the cancellation happened, and

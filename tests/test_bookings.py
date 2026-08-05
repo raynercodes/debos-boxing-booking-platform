@@ -211,13 +211,17 @@ def test_genes_bookings_never_slot_claimed_multiple_allowed(mock_aws_infra, mock
     assert second.status_code == 201  # NOT blocked — group class, multiple bookings allowed
 
 
-def test_cancelling_confirmed_personal_booking_releases_slot(
+def test_cancelling_confirmed_personal_booking_does_not_release_slot(
     mock_aws_infra, mock_stripe_checkout, mock_stripe_webhook_verify, admin_token
 ):
-    """Confirms the full lifecycle: claim -> confirm -> cancel -> slot free
-    again. Without the release-on-cancel step, a cancelled Personal booking
-    would leave its time permanently unbookable even though it's genuinely
-    free again."""
+    """DELIBERATE business decision, not a bug: cancelling a Personal
+    booking does NOT free the slot back up. If Debo cancels, it's almost
+    always for a real reason, and that exact date+time shouldn't be
+    instantly re-bookable by a stranger without him actively re-opening it.
+    Refunds are handled the same way — manually, by Debo, in Stripe's own
+    dashboard, not automated here. See the reasoning in routes/bookings.py's
+    cancel_booking for the full case (this only affects the ONE cancelled
+    date+time, not future weeks at the same time)."""
     payload = _booking_payload(BookingType.personal_trainer_travels)
     created = client.post("/bookings/", json=payload).json()
     _confirm_via_webhook(created["booking_id"], mock_stripe_webhook_verify)
@@ -227,9 +231,12 @@ def test_cancelling_confirmed_personal_booking_releases_slot(
         headers={"Authorization": f"Bearer {admin_token}"},
     )
     assert cancel_response.status_code == 200
+    assert cancel_response.json()["status"] == "cancelled"
 
+    # The slot should STILL be blocked — a new booking attempt for the same
+    # exact date+time+type must be rejected, not allowed through.
     retry = client.post("/bookings/", json=payload)
-    assert retry.status_code == 201
+    assert retry.status_code == 409
 
 
 # --- Retrieval / listing / cancellation (updated for checkout-based creation) ---

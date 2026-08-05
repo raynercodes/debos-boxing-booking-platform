@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 
+import pytest
 from fastapi.testclient import TestClient
 
 from src.api.main import app
@@ -138,3 +139,100 @@ def test_cancel_booking_requires_admin(mock_aws_infra):
     created = client.post("/bookings/", json=_booking_payload(BookingType.genes_kids)).json()
     response = client.patch(f"/bookings/{created['booking_id']}/cancel")
     assert response.status_code in (401, 403)
+
+
+def test_repository_rejects_duplicate_booking_id(mock_aws_infra):
+    """The API layer always generates a fresh UUID, so this path can't be
+    triggered through HTTP requests alone — testing the repository directly
+    confirms the conditional write itself actually guards against a
+    collision, rather than trusting that "UUIDs basically never collide"
+    without ever having verified the guard code runs correctly."""
+    from src.api.core.bookings_repository import BookingRepository
+    from src.api.core.database import get_db_service
+    from src.api.core.exceptions import ExternalServiceError
+
+    repo = BookingRepository(get_db_service())
+    item = {
+        "booking_id": "duplicate-test-id",
+        "name": "First", "email": "a@example.com", "phone": "4045551234",
+        "session_date": "2026-08-10", "session_time": "10:00",
+        "booking_type": "genes_adult", "location": "genes", "session_detail": "adult",
+        "price_usd": 100, "status": "confirmed",
+        "created_at": "2026-08-01T00:00:00+00:00", "reminder_sent": False,
+    }
+    repo.create(item)
+    with pytest.raises(ExternalServiceError):
+        repo.create(item)  # same booking_id again
+
+
+def test_cancel_completed_booking_still_succeeds(mock_aws_infra, admin_token):
+    """Confirms the double-cancel guard ONLY blocks the specific case of
+    already-cancelled — a 'completed' booking (or any other non-cancelled
+    status) must still be cancellable "at any time," exactly as specified."""
+    from src.api.core.bookings_repository import BookingRepository
+    from src.api.core.database import get_db_service
+
+    repo = BookingRepository(get_db_service())
+    item = {
+        "booking_id": "completed-test-id",
+        "name": "Done Client", "email": "done@example.com", "phone": "4045551234",
+        "session_date": "2026-08-10", "session_time": "10:00",
+        "booking_type": "genes_adult", "location": "genes", "session_detail": "adult",
+        "price_usd": 100, "status": "completed",
+        "created_at": "2026-08-01T00:00:00+00:00", "reminder_sent": False,
+    }
+    repo.create(item)
+
+    response = client.patch(
+        f"/bookings/{item['booking_id']}/cancel",
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == "cancelled"
+
+
+def test_history_visibility_filter_excludes_past_bookings(mock_aws_infra, admin_token):
+    """A booking more than 1hr past its start time should disappear from the
+    admin LIST view, but remain fully fetchable by ID — the record is never
+    deleted, only hidden from the default list (see HISTORY_VISIBILITY_WINDOW
+    comment in routes/bookings.py for why this is a display filter, not a
+    deletion policy).
+
+    NOTE: constructs the past time as today's date at 00:05 UTC, which is
+    safely >1hr in the past for any test run after ~01:05 UTC — the only
+    edge case this doesn't cover is a test suite run in the first ~65
+    minutes of the UTC day, which is an accepted, extremely low-probability
+    gap rather than something worth writing significantly more complex
+    date-rollover-safe logic for."""
+    from src.api.core.bookings_repository import BookingRepository
+    from src.api.core.database import get_db_service
+    from datetime import datetime, timezone
+
+    repo = BookingRepository(get_db_service())
+    today = datetime.now(timezone.utc).date()
+    past_item = {
+        "booking_id": "past-visibility-test-id",
+        "name": "Past Client", "email": "past@example.com", "phone": "4045551234",
+        "session_date": today.isoformat(), "session_time": "00:05",
+        "booking_type": "genes_adult", "location": "genes", "session_detail": "adult",
+        "price_usd": 100, "status": "confirmed",
+        "created_at": datetime.now(timezone.utc).isoformat(), "reminder_sent": False,
+    }
+    repo.create(past_item)
+
+    # Still individually fetchable — history filter only applies to the LIST view
+    get_response = client.get(f"/bookings/{past_item['booking_id']}")
+    assert get_response.status_code == 200
+
+    # But excluded from the admin list
+    list_response = client.get("/bookings/", headers={"Authorization": f"Bearer {admin_token}"})
+    booking_ids = [b["booking_id"] for b in list_response.json()]
+    assert past_item["booking_id"] not in booking_ids
+
+
+def test_list_bookings_invalid_day_of_week_rejected(mock_aws_infra, admin_token):
+    response = client.get(
+        "/bookings/", params={"day_of_week": "someday"},
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert response.status_code == 400  # generic AppError handler

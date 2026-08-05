@@ -13,6 +13,8 @@ state leaking into whatever runs next. Both directions matter — this is
 exactly the class of bug worth preventing here rather than rediscovering.
 """
 
+import json
+
 import boto3
 import pytest
 from moto import mock_aws
@@ -31,6 +33,13 @@ TEST_ENV_VARS = {
     "PASSWORD_PEPPER_PATH": "/debos-boxing/test/password-pepper",
     "ADMIN_EMAIL": "test-admin@example-test.invalid",
 }
+
+# A known password used ONLY in tests, to exercise the real /auth/login
+# route end-to-end (right password, wrong password, lockout escalation).
+# Previously nothing did this — the admin_token fixture below minted a JWT
+# directly, bypassing login entirely, which meant the login route itself
+# had zero real test coverage.
+TEST_ADMIN_PASSWORD = "TestAdminPassword123!"
 
 
 @pytest.fixture(autouse=True)
@@ -101,6 +110,24 @@ def mock_aws_infra(aws_test_env):
             SecretString='{"pepper": "test-pepper-not-a-real-value"}',
         )
 
+        # Admin credentials secret needs a REAL computed hash, not a
+        # placeholder — otherwise no test could ever exercise a genuinely
+        # correct /auth/login. The hash must be computed AFTER the pepper
+        # secret above exists (hash_password reads the pepper), and the
+        # singleton must be reset first so the SecurityService instance
+        # used here actually talks to the freshly-mocked Secrets Manager
+        # rather than any stale prior instance.
+        security_module._security_service = None
+        security_service = security_module.get_security_service()
+        admin_password_hash = security_service.hash_password(TEST_ADMIN_PASSWORD)
+        sm.create_secret(
+            Name=TEST_ENV_VARS["ADMIN_CREDENTIALS_PATH"],
+            SecretString=json.dumps({"password_hash": admin_password_hash}),
+        )
+        # Reset again so actual test code gets a clean instance too, rather
+        # than reusing internal state left over from computing the hash above.
+        security_module._security_service = None
+
         yield ddb
 
 
@@ -110,3 +137,4 @@ def admin_token(mock_aws_infra):
     /auth/login route would, using the mocked JWT secret above. Lets tests
     exercise the real require_admin dependency instead of bypassing it."""
     return security_module.get_security_service().create_jwt()
+

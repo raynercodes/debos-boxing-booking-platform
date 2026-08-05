@@ -65,16 +65,24 @@ class LockoutManager:
         if not item:
             return LockoutRecord()
 
+        # DynamoDB returns numbers as Decimal, not int/float — explicit int()
+        # conversion here is what fixes a real bug this test suite caught:
+        # record.lockout_stage was being used directly as a list index
+        # (LOCKOUT_WINDOWS[record.lockout_stage]) further down, which crashes
+        # immediately on a Decimal ("list indices must be integers... not
+        # decimal.Decimal"). No test before this ever drove a real 5th-failure
+        # through actual DynamoDB, so this was invisible until tested for real.
+        locked_until = int(item.get("locked_until", 0))
+
         # Never trust physical TTL deletion alone — evaluate explicitly
-        locked_until = item.get("locked_until", 0)
         if locked_until and locked_until < int(time.time()):
-            return LockoutRecord(attempts=item.get("attempts", 0), locked_until=0,
-                                  lockout_stage=item.get("lockout_stage", 0))
+            return LockoutRecord(attempts=int(item.get("attempts", 0)), locked_until=0,
+                                  lockout_stage=int(item.get("lockout_stage", 0)))
 
         return LockoutRecord(
-            attempts=item.get("attempts", 0),
+            attempts=int(item.get("attempts", 0)),
             locked_until=locked_until,
-            lockout_stage=item.get("lockout_stage", 0),
+            lockout_stage=int(item.get("lockout_stage", 0)),
         )
 
     def check_lockout(self) -> None:

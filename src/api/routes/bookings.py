@@ -4,7 +4,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, Query
 from fastapi.security import HTTPBearer
 
-from src.api.models.booking import BookingRequest, BookingResponse, BookingStatus
+from src.api.models.booking import BookingRequest, BookingResponse, BookingStatus, BOOKING_TYPE_RULES
 from src.api.core.security import get_security_service
 from src.api.core.exceptions import AppError
 from src.api.core.logging_config import get_logger
@@ -51,7 +51,23 @@ def require_admin(credentials=Depends(bearer_scheme)):
 async def create_booking(request: BookingRequest):
     # TODO: write to debos-boxing-bookings table once infrastructure/template.yaml is deployed
     # TODO: trigger SES confirmation email + gym owner notification
-    logger.info("Booking created for session %s %s", request.session_date, request.session_time)
+    # TODO: create a Stripe Payment Intent / Checkout Session for price_usd
+    #       once payments are wired in — one-time charge only, no
+    #       subscription/recurring billing needed (memberships confirmed
+    #       not a thing).
+
+    # Price is ALWAYS looked up server-side from BOOKING_TYPE_RULES, never
+    # accepted as a value from the client. If the client could send its own
+    # price, anyone could book a $100 Gene's adult session and submit
+    # price_usd=1 — the server is the only source of truth for what
+    # something costs, the request only says WHAT was booked, never
+    # WHAT IT COSTS.
+    price_usd = BOOKING_TYPE_RULES[request.booking_type]["price_usd"]
+
+    logger.info(
+        "Booking created for session %s %s (%s, $%s)",
+        request.session_date, request.session_time, request.booking_type.value, price_usd,
+    )
     return BookingResponse(
         booking_id=str(uuid.uuid4()),
         name=request.name,
@@ -59,6 +75,8 @@ async def create_booking(request: BookingRequest):
         phone=request.phone,
         session_date=request.session_date,
         session_time=request.session_time,
+        booking_type=request.booking_type,
+        price_usd=price_usd,
         status=BookingStatus.confirmed,
         created_at=datetime.now(timezone.utc).isoformat(),
         reminder_sent=False,

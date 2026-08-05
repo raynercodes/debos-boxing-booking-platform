@@ -130,12 +130,13 @@ def test_invalid_location_detail_combinations_rejected(location, detail):
 @pytest.mark.parametrize("booking_type,location,detail", [
     (BookingType.personal_client_travels, "mobile_personal", "client_travels"),
     (BookingType.personal_trainer_travels, "mobile_personal", "trainer_travels"),
+    (BookingType.personal_virtual, "mobile_personal", "virtual"),
     (BookingType.genes_adult, "genes", "adult"),
     (BookingType.genes_kids, "genes", "kids"),
 ])
-def test_all_four_real_combinations_accepted(booking_type, location, detail):
-    """The inverse of the rejection test above — confirms all 4 REAL
-    offerings are accepted, not just that invalid ones are rejected."""
+def test_all_real_combinations_accepted(booking_type, location, detail):
+    """Confirms all 5 REAL offerings are accepted, not just that invalid
+    ones are rejected."""
     payload = _base_payload(
         session_date=_valid_date_for(booking_type), location=location, session_detail=detail
     )

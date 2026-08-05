@@ -1,13 +1,18 @@
+import os
 import uuid
 from datetime import datetime, timezone, timedelta
 from typing import Optional, List
 from fastapi import APIRouter, Depends, Query
 from fastapi.security import HTTPBearer
 
-from src.api.models.booking import BookingRequest, BookingResponse, BookingStatus, BOOKING_TYPE_RULES
+from src.api.models.booking import (
+    BookingRequest, BookingResponse, BookingCheckoutResponse, BookingStatus,
+    BOOKING_TYPE_RULES, CHECKOUT_SESSION_EXPIRY_MINUTES, requires_slot_claim,
+)
 from src.api.core.security import get_security_service
 from src.api.core.database import get_db_service
 from src.api.core.bookings_repository import BookingRepository
+from src.api.core.stripe_service import get_stripe_service
 from src.api.core.exceptions import AppError
 from src.api.core.logging_config import get_logger
 
@@ -44,6 +49,20 @@ class BookingAlreadyCancelledError(AppError):
     email bug: once cancellation emails are wired in (to both Debo and the
     client), a second cancel attempt on an already-cancelled booking must
     NOT re-trigger those emails."""
+
+
+class SlotProcessingError(AppError):
+    """409 — a Personal slot is currently being checked out by someone
+    else. Confirmed UX: 'this booking is currently being booked, it might
+    be available soon, try again later' — the person hasn't fully lost the
+    slot yet (the other checkout could still expire), just not right now."""
+
+
+class SlotTakenError(AppError):
+    """409 — a Personal slot is already CONFIRMED (paid) by someone else.
+    Confirmed UX: distinct message from SlotProcessingError — 'sorry, this
+    booking is taken, try another day or time' — this one is final, not a
+    'try again shortly' situation."""
 
 
 def require_admin(credentials=Depends(bearer_scheme)):
@@ -90,10 +109,11 @@ def _is_past_visibility_window(item: dict) -> bool:
 
 @router.post(
     "/",
-    response_model=BookingResponse,
+    response_model=BookingCheckoutResponse,
     status_code=201,
-    summary="Create Booking",
-    description="Submit a new session booking.",
+    summary="Create Booking (starts Stripe checkout)",
+    description="Submit a new session booking. Returns a Stripe checkout URL — "
+                "the booking is NOT confirmed until payment succeeds via webhook.",
 )
 async def create_booking(request: BookingRequest):
     # Price is ALWAYS looked up server-side from BOOKING_TYPE_RULES, never
@@ -102,16 +122,34 @@ async def create_booking(request: BookingRequest):
     # price_usd=1 — the server is the only source of truth for what
     # something costs, the request only says WHAT was booked, never
     # WHAT IT COSTS.
-    price_usd = BOOKING_TYPE_RULES[request.booking_type]["price_usd"]
+    booking_type = request.booking_type
+    price_usd = BOOKING_TYPE_RULES[booking_type]["price_usd"]
+    repo = _get_repository()
+    booking_id = str(uuid.uuid4())
+
+    # Slot claiming ONLY applies to Personal training (any of the 3
+    # delivery methods) — Debo can only train one person at a given
+    # date+time regardless of format. Gene's classes are group settings
+    # and skip this entirely; multiple people can book the same class time.
+    if requires_slot_claim(booking_type):
+        claim_result = repo.claim_personal_slot(request.session_date, request.session_time, booking_id)
+        if claim_result["outcome"] == "already_processing":
+            raise SlotProcessingError(
+                "This booking is currently being processed. It might be available soon — try again shortly."
+            )
+        if claim_result["outcome"] == "already_confirmed":
+            raise SlotTakenError(
+                "Sorry, this booking is taken. Try another available day or time."
+            )
 
     item = {
-        "booking_id": str(uuid.uuid4()),
+        "booking_id": booking_id,
         "name": request.name,
         "email": request.email,
         "phone": request.phone,
         "session_date": request.session_date,
         "session_time": request.session_time,
-        "booking_type": request.booking_type.value,
+        "booking_type": booking_type.value,
         # location/session_detail stored alongside the derived booking_type
         # even though BookingResponse doesn't expose them yet — cheap to
         # store on a schemaless DynamoDB item, and useful for future
@@ -120,22 +158,53 @@ async def create_booking(request: BookingRequest):
         "location": request.location.value,
         "session_detail": request.session_detail.value,
         "price_usd": price_usd,
-        "status": BookingStatus.confirmed.value,
+        "status": BookingStatus.processing.value,  # NEVER confirmed here — only the webhook confirms
         "created_at": datetime.now(timezone.utc).isoformat(),
         "reminder_sent": False,
     }
 
-    _get_repository().create(item)
+    try:
+        repo.create(item)
+    except Exception:
+        # If the booking write fails after a slot claim succeeded, release
+        # the claim — otherwise a failed write would leave a phantom claim
+        # blocking the slot forever with no booking behind it.
+        if requires_slot_claim(booking_type):
+            repo.release_slot(request.session_date, request.session_time)
+        raise
 
-    # TODO: trigger SES confirmation email + gym owner notification
-    # TODO: create a Stripe Payment Intent / Checkout Session for price_usd
-    #       once payments are wired in — one-time charge only.
+    # Framer URLs are placeholders until the frontend exists — TODO once
+    # Framer is wired in, point these at the real confirmation/cancelled
+    # pages instead of this API's own domain.
+    base_url = os.environ.get("FRONTEND_BASE_URL", "https://debosboxingandfitness.com")
+    stripe_service = get_stripe_service()
+    try:
+        session = stripe_service.create_checkout_session(
+            booking_id=booking_id,
+            price_usd=price_usd,
+            booking_type_label=booking_type.value.replace("_", " ").title(),
+            customer_email=request.email,
+            success_url=f"{base_url}/booking-confirmed?booking_id={booking_id}",
+            cancel_url=f"{base_url}/booking-cancelled?booking_id={booking_id}",
+            expires_in_minutes=CHECKOUT_SESSION_EXPIRY_MINUTES,
+        )
+    except Exception:
+        # Same reasoning as above — if Stripe itself fails, don't leave a
+        # phantom claim/booking behind with no way to ever pay for it.
+        if requires_slot_claim(booking_type):
+            repo.release_slot(request.session_date, request.session_time)
+        raise
 
     logger.info(
-        "Booking created: %s %s (%s, $%s)",
-        request.session_date, request.session_time, request.booking_type.value, price_usd,
+        "Checkout started: %s %s (%s, $%s) booking_id=%s",
+        request.session_date, request.session_time, booking_type.value, price_usd, booking_id,
     )
-    return _item_to_response(item)
+    return BookingCheckoutResponse(
+        booking_id=booking_id,
+        status=BookingStatus.processing,
+        price_usd=price_usd,
+        checkout_url=session.url,
+    )
 
 
 @router.get(
@@ -167,6 +236,11 @@ async def list_bookings(
     all_items: List[dict] = []
     for date in week_dates:
         all_items.extend(repo.query_by_date(date.isoformat()))
+
+    # Slot-claim records share the bookings table but aren't real bookings —
+    # filter them out before anything else touches this list. They're
+    # identifiable by their synthetic "personal-slot#..." booking_id prefix.
+    all_items = [item for item in all_items if not item["booking_id"].startswith("personal-slot#")]
 
     # History filter — computed fresh on every call, never trusted from a
     # stored flag (see HISTORY_VISIBILITY_WINDOW comment above).
@@ -222,10 +296,20 @@ async def cancel_booking(booking_id: str):
         # No emails fire here — this is a rejected no-op, not a state change.
         raise BookingAlreadyCancelledError(f"Booking {booking_id} is already cancelled")
 
+    item = result["item"]
+
+    # Cancelling a Personal booking must ALSO release its slot claim — a
+    # confirmed Personal slot's claim persists specifically to block that
+    # date+time; if we cancelled the booking but left the claim in place,
+    # that time would stay permanently unbookable even though it's actually
+    # free again.
+    if requires_slot_claim(item["booking_type"]):
+        _get_repository().release_slot(item["session_date"], item["session_time"])
+
     # TODO (future, once SES is wired in): send TWO emails on successful
     # cancellation — one to Debo confirming the cancellation happened, and
     # one to the original booker (client) notifying them their session was
     # cancelled. Both emails belong HERE, only on the "cancelled" outcome
     # above, never on the "already_cancelled" rejection path.
     logger.info("Booking %s cancelled by admin", booking_id)
-    return _item_to_response(result["item"])
+    return _item_to_response(item)

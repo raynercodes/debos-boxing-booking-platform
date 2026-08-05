@@ -61,6 +61,24 @@ class BookingRepository:
             logger.error("Failed to read booking %s: %s", booking_id, exc, exc_info=True)
             raise ExternalServiceError("Unable to retrieve booking") from exc
 
+    def set_status(self, booking_id: str, new_status: str) -> None:
+        """Unconditional status set — used ONLY by the Stripe webhook
+        handler to transition processing -> confirmed/expired. Deliberately
+        no ConditionExpression restricting the prior status, unlike
+        cancel() above: the webhook is the trusted, verified source of
+        truth for payment outcomes, not a user-facing action that needs the
+        same "don't let this happen twice" guard admin cancellation does."""
+        try:
+            self._db.bookings_table.update_item(
+                Key={"booking_id": booking_id},
+                UpdateExpression="SET #s = :new_status",
+                ExpressionAttributeNames={"#s": "status"},
+                ExpressionAttributeValues={":new_status": new_status},
+            )
+        except (ClientError, BotoCoreError) as exc:
+            logger.error("Failed to set booking %s status to %s: %s", booking_id, new_status, exc, exc_info=True)
+            raise ExternalServiceError("Unable to update booking status") from exc
+
     def query_by_date(self, session_date: str) -> List[dict]:
         """One Query per exact date against the session-date-index GSI.
         Deliberately NOT a Scan — the admin week-view endpoint calls this
@@ -118,3 +136,86 @@ class BookingRepository:
         except BotoCoreError as exc:
             logger.error("Failed to cancel booking %s: %s", booking_id, exc, exc_info=True)
             raise ExternalServiceError("Unable to cancel booking") from exc
+
+    # ---------------------------------------------------------------
+    # Slot claiming — Personal training exclusivity
+    #
+    # A "slot claim" is a SEPARATE item in the SAME bookings table, keyed
+    # by a deterministic id derived from date+time rather than a random
+    # UUID: "personal-slot#{session_date}#{session_time}". Reusing the same
+    # table (rather than a whole new one) keeps this simple — DynamoDB is
+    # schemaless, so a differently-shaped item living alongside real
+    # bookings costs nothing extra in infrastructure.
+    #
+    # The claim's own "booking_id" being that deterministic string is what
+    # makes the exclusivity atomic: attribute_not_exists(booking_id) can
+    # only succeed ONCE for a given date+time, no matter how many requests
+    # race to claim it simultaneously. Whoever's conditional write wins,
+    # wins — there's no window where two requests could both believe they
+    # successfully claimed the same slot.
+    # ---------------------------------------------------------------
+
+    @staticmethod
+    def _slot_claim_key(session_date: str, session_time: str) -> str:
+        return f"personal-slot#{session_date}#{session_time}"
+
+    def claim_personal_slot(self, session_date: str, session_time: str, real_booking_id: str) -> dict:
+        """Attempts to atomically claim a Personal-training date+time slot.
+        Returns {"outcome": "claimed"} on success, or
+        {"outcome": "already_processing" | "already_confirmed"} if someone
+        else already holds it — the caller uses this to pick between the
+        two different messages: "try again shortly" vs "pick another time."""
+        claim_key = self._slot_claim_key(session_date, session_time)
+        try:
+            self._db.bookings_table.put_item(
+                Item={
+                    "booking_id": claim_key,
+                    "real_booking_id": real_booking_id,
+                    "status": "processing",
+                },
+                ConditionExpression="attribute_not_exists(booking_id)",
+            )
+            return {"outcome": "claimed"}
+        except ClientError as exc:
+            if exc.response["Error"]["Code"] == "ConditionalCheckFailedException":
+                existing = self.get_by_id(claim_key)
+                # existing should always be present here (the condition only
+                # fails if something's already there) — defensive fallback
+                # to "already_confirmed" (the safer, more restrictive
+                # outcome) if it's somehow missing by the time we re-read it.
+                current_status = existing["status"] if existing else "confirmed"
+                outcome = "already_processing" if current_status == "processing" else "already_confirmed"
+                return {"outcome": outcome}
+            logger.error("Failed to claim slot %s: %s", claim_key, exc, exc_info=True)
+            raise ExternalServiceError("Unable to check slot availability") from exc
+        except BotoCoreError as exc:
+            logger.error("Failed to claim slot %s: %s", claim_key, exc, exc_info=True)
+            raise ExternalServiceError("Unable to check slot availability") from exc
+
+    def confirm_slot(self, session_date: str, session_time: str) -> None:
+        """Called from the webhook once payment succeeds — flips the claim
+        from 'processing' to 'confirmed', so it now permanently blocks that
+        date+time until an admin cancellation releases it."""
+        claim_key = self._slot_claim_key(session_date, session_time)
+        try:
+            self._db.bookings_table.update_item(
+                Key={"booking_id": claim_key},
+                UpdateExpression="SET #s = :confirmed",
+                ExpressionAttributeNames={"#s": "status"},
+                ExpressionAttributeValues={":confirmed": "confirmed"},
+            )
+        except (ClientError, BotoCoreError) as exc:
+            logger.error("Failed to confirm slot claim %s: %s", claim_key, exc, exc_info=True)
+            raise ExternalServiceError("Unable to finalize slot") from exc
+
+    def release_slot(self, session_date: str, session_time: str) -> None:
+        """Deletes the claim entirely — used on checkout expiry AND on
+        admin cancellation of a confirmed Personal booking. delete_item on
+        a key that doesn't exist is a harmless no-op in DynamoDB, so this
+        is safe to call even if the claim was somehow already gone."""
+        claim_key = self._slot_claim_key(session_date, session_time)
+        try:
+            self._db.bookings_table.delete_item(Key={"booking_id": claim_key})
+        except (ClientError, BotoCoreError) as exc:
+            logger.error("Failed to release slot claim %s: %s", claim_key, exc, exc_info=True)
+            raise ExternalServiceError("Unable to release slot") from exc

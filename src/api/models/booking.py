@@ -13,13 +13,15 @@ PHONE_PATTERN = re.compile(r"^\+?[0-9]{7,15}$")
 
 
 class BookingStatus(str, Enum):
-    confirmed = "confirmed"
+    processing = "processing"  # Stripe checkout started, payment not yet confirmed
+    confirmed = "confirmed"    # ONLY ever set by the Stripe webhook — never on creation
     cancelled = "cancelled"
     completed = "completed"
+    expired = "expired"        # checkout session expired unpaid, slot released
 
 
 class BookingType(str, Enum):
-    """The four REAL offerings that exist, confirmed directly from Debo —
+    """The five REAL offerings that exist, confirmed directly from Debo —
     not a guess. This went through two earlier, wrong shapes before this:
       1. First pass treated 'genes' as a third category alongside
          personal/kids, as if location and session type were the same axis.
@@ -28,14 +30,36 @@ class BookingType(str, Enum):
          kids training could happen at either location — it can't.
     This third pass restores the location/subtype split (matching the
     original reference table), but with the two fields now CROSS-VALIDATED
-    below so only the 4 real combinations are ever accepted — the earlier
+    below so only the real combinations are ever accepted — the earlier
     version's mistake wasn't having two fields, it was letting them vary
     independently when reality doesn't allow that.
+
+    personal_virtual added later, once confirmed — same price as
+    client_travels ($40), since Debo reasoned the client isn't costing him
+    gas/travel either way (client comes to him, or joins by Zoom).
     """
     personal_client_travels = "personal_client_travels"  # client comes to Debo — $40, Mon-Fri
     personal_trainer_travels = "personal_trainer_travels"  # Debo goes to client — $50, Mon-Fri
+    personal_virtual = "personal_virtual"  # Zoom session — $40, Mon-Fri
     genes_adult = "genes_adult"  # Gene's location, adults — $100, Mon-Thu
     genes_kids = "genes_kids"  # Gene's location, ages 6-13 — $90, Mon-Wed
+
+
+# Personal training types are ALL mutually exclusive against each other for
+# the SAME date+time — Debo can only train one person at a given moment
+# regardless of whether it's in-person or virtual. Gene's classes are group
+# settings and never go through slot-claiming at all. This set is what the
+# slot-claim logic checks against to decide whether a booking needs
+# exclusivity enforcement in the first place.
+PERSONAL_BOOKING_TYPES = {
+    BookingType.personal_client_travels,
+    BookingType.personal_trainer_travels,
+    BookingType.personal_virtual,
+}
+
+
+def requires_slot_claim(booking_type: BookingType) -> bool:
+    return booking_type in PERSONAL_BOOKING_TYPES
 
 
 class Location(str, Enum):
@@ -46,24 +70,27 @@ class Location(str, Enum):
 
 class SessionDetail(str, Enum):
     """The detail WITHIN a location. Which values are valid depends on
-    which Location was chosen — client_travels/trainer_travels only make
-    sense for mobile_personal, adult/kids only make sense for genes. That
-    dependency is exactly why this can't be a single flat field on its own;
-    the model_validator below enforces the valid (location, detail) pairs."""
+    which Location was chosen — client_travels/trainer_travels/virtual only
+    make sense for mobile_personal, adult/kids only make sense for genes.
+    That dependency is exactly why this can't be a single flat field on its
+    own; the model_validator below enforces the valid (location, detail)
+    pairs."""
     client_travels = "client_travels"  # only valid with mobile_personal
     trainer_travels = "trainer_travels"  # only valid with mobile_personal
+    virtual = "virtual"  # only valid with mobile_personal — Zoom session
     adult = "adult"  # only valid with genes
     kids = "kids"  # only valid with genes
 
 
 # Maps the (location, detail) pair to the resulting BookingType, plus
-# validates that combination is one of the 4 real offerings. Using a tuple
+# validates that combination is one of the real offerings. Using a tuple
 # key here means an invalid pairing (e.g. genes + client_travels) simply
 # isn't IN this dict at all — the lookup itself fails naturally rather than
 # needing a separate list of "allowed pairs" to keep in sync.
 LOCATION_DETAIL_TO_BOOKING_TYPE: Dict[Tuple[Location, SessionDetail], BookingType] = {
     (Location.mobile_personal, SessionDetail.client_travels): BookingType.personal_client_travels,
     (Location.mobile_personal, SessionDetail.trainer_travels): BookingType.personal_trainer_travels,
+    (Location.mobile_personal, SessionDetail.virtual): BookingType.personal_virtual,
     (Location.genes, SessionDetail.adult): BookingType.genes_adult,
     (Location.genes, SessionDetail.kids): BookingType.genes_kids,
 }
@@ -77,11 +104,19 @@ LOCATION_DETAIL_TO_BOOKING_TYPE: Dict[Tuple[Location, SessionDetail], BookingTyp
 BOOKING_TYPE_RULES: Dict[BookingType, dict] = {
     BookingType.personal_client_travels: {"price_usd": 40, "allowed_weekdays": {0, 1, 2, 3, 4}},  # Mon-Fri
     BookingType.personal_trainer_travels: {"price_usd": 50, "allowed_weekdays": {0, 1, 2, 3, 4}},  # Mon-Fri
+    BookingType.personal_virtual: {"price_usd": 40, "allowed_weekdays": {0, 1, 2, 3, 4}},  # Mon-Fri
     BookingType.genes_adult: {"price_usd": 100, "allowed_weekdays": {0, 1, 2, 3}},  # Mon-Thu
     BookingType.genes_kids: {"price_usd": 90, "allowed_weekdays": {0, 1, 2}},  # Mon-Wed
 }
 
 KIDS_AGE_RANGE = "6-13"  # confirmed — used for the UI label, e.g. "Kids (ages 6-13)"
+
+# How long a Stripe Checkout Session stays valid before it expires unpaid.
+# Long enough to actually complete a payment, short enough that an
+# abandoned checkout doesn't block a real Personal slot for hours. This is
+# a reasonable engineering default, not a business-confirmed number — easy
+# to tune later without touching anything else in the system.
+CHECKOUT_SESSION_EXPIRY_MINUTES = 20
 
 
 class BookingRequest(BaseModel):
@@ -193,6 +228,20 @@ class BookingResponse(BaseModel):
     status: BookingStatus
     created_at: str
     reminder_sent: bool
+
+
+class BookingCheckoutResponse(BaseModel):
+    """Returned ONLY from booking creation — this is the one moment a
+    checkout_url is meaningful. Kept as a separate model from BookingResponse
+    rather than adding an optional field there, since every OTHER response
+    (GET, list, cancel) would just carry a permanently-null field that never
+    applies to them. A field that's only ever populated in one specific
+    context belongs on a model scoped to that context, not bolted onto a
+    general-purpose one."""
+    booking_id: str
+    status: BookingStatus  # will be "processing" at this point, always
+    price_usd: int
+    checkout_url: str
 
 
 # TODO (future, not MVP): mouthpiece sales (local pickup or delivery) — a

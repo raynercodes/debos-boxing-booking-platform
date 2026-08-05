@@ -14,6 +14,7 @@ exactly the class of bug worth preventing here rather than rediscovering.
 """
 
 import json
+from unittest.mock import patch, MagicMock
 
 import boto3
 import pytest
@@ -21,6 +22,7 @@ from moto import mock_aws
 
 import src.api.core.database as database_module
 import src.api.core.security as security_module
+import src.api.core.stripe_service as stripe_service_module
 
 TEST_ENV_VARS = {
     "ENVIRONMENT": "dev",
@@ -31,7 +33,9 @@ TEST_ENV_VARS = {
     "JWT_SECRET_PATH": "/debos-boxing/test/jwt-secret",
     "ADMIN_CREDENTIALS_PATH": "/debos-boxing/test/admin-credentials",
     "PASSWORD_PEPPER_PATH": "/debos-boxing/test/password-pepper",
+    "STRIPE_SECRET_PATH": "/debos-boxing/test/stripe-secret",
     "ADMIN_EMAIL": "test-admin@example-test.invalid",
+    "FRONTEND_BASE_URL": "https://test.example.invalid",
 }
 
 # A known password used ONLY in tests, to exercise the real /auth/login
@@ -46,9 +50,11 @@ TEST_ADMIN_PASSWORD = "TestAdminPassword123!"
 def reset_singletons():
     database_module._db_service = None
     security_module._security_service = None
+    stripe_service_module._stripe_service = None
     yield
     database_module._db_service = None
     security_module._security_service = None
+    stripe_service_module._stripe_service = None
 
 
 @pytest.fixture(autouse=True)
@@ -109,6 +115,10 @@ def mock_aws_infra(aws_test_env):
             Name=TEST_ENV_VARS["PASSWORD_PEPPER_PATH"],
             SecretString='{"pepper": "test-pepper-not-a-real-value"}',
         )
+        sm.create_secret(
+            Name=TEST_ENV_VARS["STRIPE_SECRET_PATH"],
+            SecretString='{"api_key": "sk_test_not_a_real_key", "webhook_secret": "whsec_not_a_real_secret"}',
+        )
 
         # Admin credentials secret needs a REAL computed hash, not a
         # placeholder — otherwise no test could ever exercise a genuinely
@@ -138,3 +148,27 @@ def admin_token(mock_aws_infra):
     exercise the real require_admin dependency instead of bypassing it."""
     return security_module.get_security_service().create_jwt()
 
+
+@pytest.fixture
+def mock_stripe_checkout():
+    """Mocks the actual outbound call to Stripe's API — same philosophy as
+    moto mocking AWS. Our OWN StripeService code still runs for real (secret
+    fetching, price-to-cents conversion, error handling); only the real
+    network call to Stripe is intercepted, so tests stay fast, offline, and
+    deterministic without needing real Stripe test credentials."""
+    with patch("stripe.checkout.Session.create") as mock_create:
+        fake_session = MagicMock()
+        fake_session.url = "https://checkout.stripe.com/test-session-url"
+        fake_session.id = "cs_test_fake_session_id"
+        mock_create.return_value = fake_session
+        yield mock_create
+
+
+@pytest.fixture
+def mock_stripe_webhook_verify():
+    """Mocks stripe.Webhook.construct_event — lets tests supply a fake but
+    properly-shaped event without needing a real Stripe-signed payload,
+    while still exercising our OWN webhook route logic for real (looking up
+    the booking, updating status, releasing/confirming slots)."""
+    with patch("stripe.Webhook.construct_event") as mock_verify:
+        yield mock_verify

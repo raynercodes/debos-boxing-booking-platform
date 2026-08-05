@@ -3,7 +3,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from mangum import Mangum
 
-from src.api.routes import health, bookings, leads, auth
+from src.api.routes import health, bookings, leads, auth, webhooks
 from src.api.core.exceptions import (
     AppError,
     InvalidCredentialsError,
@@ -11,7 +11,10 @@ from src.api.core.exceptions import (
     InvalidTokenError,
     ExternalServiceError,
 )
-from src.api.routes.bookings import BookingNotFoundError, BookingAlreadyCancelledError
+from src.api.routes.bookings import (
+    BookingNotFoundError, BookingAlreadyCancelledError, SlotProcessingError, SlotTakenError,
+)
+from src.api.routes.webhooks import WebhookSignatureError
 from src.api.core.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -107,6 +110,24 @@ async def booking_already_cancelled_handler(request: Request, exc: BookingAlread
     return JSONResponse(status_code=409, content={"detail": str(exc)})
 
 
+@app.exception_handler(SlotProcessingError)
+async def slot_processing_handler(request: Request, exc: SlotProcessingError):
+    return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+
+@app.exception_handler(SlotTakenError)
+async def slot_taken_handler(request: Request, exc: SlotTakenError):
+    return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+
+@app.exception_handler(WebhookSignatureError)
+async def webhook_signature_handler(request: Request, exc: WebhookSignatureError):
+    """400, not 401 — see WebhookSignatureError's own docstring for why
+    Stripe specifically expects a 4xx here to stop retrying a permanently
+    invalid event rather than hammering the endpoint."""
+    return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+
 @app.exception_handler(AppError)
 async def generic_app_error_handler(request: Request, exc: AppError):
     """Catch-all for any AppError subclass that doesn't have a specific
@@ -124,5 +145,6 @@ app.include_router(health.router, prefix="/health", tags=["Health"])
 app.include_router(auth.router, prefix="/auth", tags=["Auth"])
 app.include_router(bookings.router, prefix="/bookings", tags=["Bookings"])
 app.include_router(leads.router, prefix="/leads", tags=["Leads"])
+app.include_router(webhooks.router, prefix="/webhooks", tags=["Webhooks"])
 
 handler = Mangum(app)

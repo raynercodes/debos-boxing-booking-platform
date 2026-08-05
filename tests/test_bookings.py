@@ -9,6 +9,32 @@ from src.api.models.booking import BOOKING_TYPE_RULES, BookingType
 client = TestClient(app)
 
 
+def _find_valid_date_and_time(booking_type: BookingType) -> tuple:
+    """Like _find_valid_date, but ALSO returns a session_time that's safe
+    regardless of what time the test actually runs at. If the chosen date
+    is TODAY, a hardcoded "10:00" could already be more than an hour in the
+    past by the time the test runs later in the day — which the history-
+    visibility filter would then (correctly) exclude from list results,
+    making an otherwise-correct test fail for a reason that has nothing to
+    do with the thing being tested. When today qualifies, push the time 2
+    hours into the future instead; if that would roll past midnight, skip
+    today entirely and use the next valid day (where any fixed time is
+    safe, since the whole day is still in the future)."""
+    allowed_weekdays = BOOKING_TYPE_RULES[booking_type]["allowed_weekdays"]
+    now = datetime.now(timezone.utc)
+    for offset in range(7):
+        candidate_date = (now + timedelta(days=offset)).date()
+        if candidate_date.weekday() not in allowed_weekdays:
+            continue
+        if offset == 0:
+            future_point = now + timedelta(hours=2)
+            if future_point.date() != candidate_date:
+                continue  # would roll into tomorrow — skip today, try the next valid day
+            return candidate_date.isoformat(), future_point.strftime("%H:%M")
+        return candidate_date.isoformat(), "10:00"
+    raise RuntimeError("no valid date/time found — should be impossible for any real schedule")
+
+
 def _find_valid_date(booking_type: BookingType) -> str:
     """Finds a real date, within the next 7 days from whenever this test
     actually runs, that falls on a weekday this booking_type is offered.
@@ -17,28 +43,25 @@ def _find_valid_date(booking_type: BookingType) -> str:
     that date is no longer "within the next week." Any 7 consecutive
     calendar days always contain exactly one occurrence of every weekday,
     so a match within range(7) is always guaranteed to exist."""
-    allowed_weekdays = BOOKING_TYPE_RULES[booking_type]["allowed_weekdays"]
-    today = datetime.now(timezone.utc).date()
-    for offset in range(7):
-        candidate = today + timedelta(days=offset)
-        if candidate.weekday() in allowed_weekdays:
-            return candidate.isoformat()
-    raise RuntimeError("no valid date found — should be impossible for any real schedule")
+    date, _ = _find_valid_date_and_time(booking_type)
+    return date
 
 
 def _booking_payload(booking_type: BookingType, **overrides) -> dict:
     location, session_detail = {
         BookingType.personal_client_travels: ("mobile_personal", "client_travels"),
         BookingType.personal_trainer_travels: ("mobile_personal", "trainer_travels"),
+        BookingType.personal_virtual: ("mobile_personal", "virtual"),
         BookingType.genes_adult: ("genes", "adult"),
         BookingType.genes_kids: ("genes", "kids"),
     }[booking_type]
+    date, time = _find_valid_date_and_time(booking_type)
     payload = {
         "name": "Test Client",
         "email": "testclient@example.com",
         "phone": "4045551234",
-        "session_date": _find_valid_date(booking_type),
-        "session_time": "10:00",
+        "session_date": date,
+        "session_time": time,
         "location": location,
         "session_detail": session_detail,
     }
@@ -46,26 +69,172 @@ def _booking_payload(booking_type: BookingType, **overrides) -> dict:
     return payload
 
 
-def test_create_booking_success(mock_aws_infra):
+def _confirm_via_webhook(booking_id: str, mock_stripe_webhook_verify):
+    """Simulates Stripe confirming payment for a booking — the ONLY way a
+    booking should ever become 'confirmed' in this system."""
+    mock_stripe_webhook_verify.return_value = {
+        "type": "checkout.session.completed",
+        "data": {"object": {"metadata": {"booking_id": booking_id}}},
+    }
+    response = client.post(
+        "/webhooks/stripe", content=b"fake-payload", headers={"stripe-signature": "fake-sig"}
+    )
+    assert response.status_code == 200
+    return response
+
+
+# --- Booking creation / checkout flow ---------------------------------------
+
+def test_create_booking_starts_checkout_not_confirmed(mock_aws_infra, mock_stripe_checkout):
+    """Creation should NEVER confirm a booking directly — this is the core
+    guarantee the whole payment-gating requirement rests on."""
     response = client.post("/bookings/", json=_booking_payload(BookingType.genes_kids))
     assert response.status_code == 201
     body = response.json()
-    assert body["booking_type"] == "genes_kids"
+    assert body["status"] == "processing"
     assert body["price_usd"] == 90  # confirmed kids pricing — never client-supplied
-    assert body["status"] == "confirmed"
-    assert body["reminder_sent"] is False
+    assert body["checkout_url"] == "https://checkout.stripe.com/test-session-url"
 
 
 def test_create_booking_invalid_location_detail_combo(mock_aws_infra):
-    """genes + client_travels isn't a real offering — client_travels only
-    applies to mobile_personal. Should be rejected at the API boundary
-    (422) before ever reaching the database."""
+    """genes + client_travels isn't a real offering — rejected at the API
+    boundary (422), never even reaching Stripe."""
     payload = _booking_payload(BookingType.genes_kids, session_detail="client_travels")
     response = client.post("/bookings/", json=payload)
     assert response.status_code == 422
 
 
-def test_get_booking_by_id(mock_aws_infra):
+def test_create_personal_virtual_booking_priced_correctly(mock_aws_infra, mock_stripe_checkout):
+    """The new Zoom option — confirmed $40, matching client_travels pricing
+    (Debo reasoned no gas cost either way)."""
+    response = client.post("/bookings/", json=_booking_payload(BookingType.personal_virtual))
+    assert response.status_code == 201
+    assert response.json()["price_usd"] == 40
+
+
+# --- Webhook confirmation flow ----------------------------------------------
+
+def test_webhook_confirms_booking_on_successful_payment(mock_aws_infra, mock_stripe_checkout, mock_stripe_webhook_verify):
+    created = client.post("/bookings/", json=_booking_payload(BookingType.genes_adult)).json()
+    _confirm_via_webhook(created["booking_id"], mock_stripe_webhook_verify)
+
+    booking = client.get(f"/bookings/{created['booking_id']}").json()
+    assert booking["status"] == "confirmed"
+
+
+def test_webhook_rejects_invalid_signature(mock_aws_infra, mock_stripe_webhook_verify):
+    mock_stripe_webhook_verify.side_effect = ValueError("Invalid signature")
+    response = client.post(
+        "/webhooks/stripe", content=b"tampered-payload", headers={"stripe-signature": "bad-sig"}
+    )
+    assert response.status_code == 400
+
+
+def test_webhook_expiry_releases_personal_slot(mock_aws_infra, mock_stripe_checkout, mock_stripe_webhook_verify):
+    """Confirms an abandoned checkout actually frees the slot back up —
+    without this, an abandoned cart would permanently block a real Personal
+    time slot forever."""
+    payload = _booking_payload(BookingType.personal_client_travels)
+    created = client.post("/bookings/", json=payload).json()
+
+    mock_stripe_webhook_verify.return_value = {
+        "type": "checkout.session.expired",
+        "data": {"object": {"metadata": {"booking_id": created["booking_id"]}}},
+    }
+    client.post("/webhooks/stripe", content=b"fake-payload", headers={"stripe-signature": "fake-sig"})
+
+    # Slot should now be free — a new booking for the SAME date/time/type
+    # should succeed, not be rejected as taken/processing.
+    second_attempt = client.post("/bookings/", json=payload)
+    assert second_attempt.status_code == 201
+
+
+# --- Slot-claim race condition (the actual double-booking prevention) ------
+
+def test_personal_slot_claimed_by_first_request_blocks_second(mock_aws_infra, mock_stripe_checkout):
+    """THE core test for the double-booking requirement — two requests for
+    the EXACT same Personal date+time. First one claims it and proceeds to
+    checkout; second must be rejected with 409, telling the client it's
+    currently being processed."""
+    payload = _booking_payload(BookingType.personal_trainer_travels)
+
+    first = client.post("/bookings/", json=payload)
+    assert first.status_code == 201
+
+    second = client.post("/bookings/", json=payload)
+    assert second.status_code == 409
+    assert "try again shortly" in second.json()["detail"].lower()
+
+
+def test_personal_slot_confirmed_blocks_new_booking_with_different_message(
+    mock_aws_infra, mock_stripe_checkout, mock_stripe_webhook_verify
+):
+    """Once a Personal slot is CONFIRMED (not just processing), a new
+    attempt at the same date+time should get the FINAL rejection message,
+    distinct from the 'try again shortly' one."""
+    payload = _booking_payload(BookingType.personal_client_travels)
+    first = client.post("/bookings/", json=payload).json()
+    _confirm_via_webhook(first["booking_id"], mock_stripe_webhook_verify)
+
+    second = client.post("/bookings/", json=payload)
+    assert second.status_code == 409
+    assert "taken" in second.json()["detail"].lower()
+
+
+def test_different_personal_delivery_methods_still_block_each_other(mock_aws_infra, mock_stripe_checkout):
+    """Confirms the exclusivity is keyed by DATE+TIME, not by the specific
+    delivery method — Debo can't simultaneously do client_travels AND
+    trainer_travels AND virtual at the same moment, so booking one must
+    block the others at that exact date+time too."""
+    date = _find_valid_date(BookingType.personal_client_travels)
+
+    client_travels_payload = _booking_payload(BookingType.personal_client_travels, session_date=date)
+    virtual_payload = _booking_payload(BookingType.personal_virtual, session_date=date)
+
+    first = client.post("/bookings/", json=client_travels_payload)
+    assert first.status_code == 201
+
+    second = client.post("/bookings/", json=virtual_payload)
+    assert second.status_code == 409  # different delivery method, SAME time — still blocked
+
+
+def test_genes_bookings_never_slot_claimed_multiple_allowed(mock_aws_infra, mock_stripe_checkout):
+    """The inverse confirmation — Gene's classes are group settings and
+    must NOT be exclusive. Two different clients booking the exact same
+    Gene's adult class time should both succeed."""
+    payload = _booking_payload(BookingType.genes_adult)
+
+    first = client.post("/bookings/", json=payload)
+    second = client.post("/bookings/", json={**payload, "name": "Second Client", "email": "second@example.com"})
+
+    assert first.status_code == 201
+    assert second.status_code == 201  # NOT blocked — group class, multiple bookings allowed
+
+
+def test_cancelling_confirmed_personal_booking_releases_slot(
+    mock_aws_infra, mock_stripe_checkout, mock_stripe_webhook_verify, admin_token
+):
+    """Confirms the full lifecycle: claim -> confirm -> cancel -> slot free
+    again. Without the release-on-cancel step, a cancelled Personal booking
+    would leave its time permanently unbookable even though it's genuinely
+    free again."""
+    payload = _booking_payload(BookingType.personal_trainer_travels)
+    created = client.post("/bookings/", json=payload).json()
+    _confirm_via_webhook(created["booking_id"], mock_stripe_webhook_verify)
+
+    cancel_response = client.patch(
+        f"/bookings/{created['booking_id']}/cancel",
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert cancel_response.status_code == 200
+
+    retry = client.post("/bookings/", json=payload)
+    assert retry.status_code == 201
+
+
+# --- Retrieval / listing / cancellation (updated for checkout-based creation) ---
+
+def test_get_booking_by_id(mock_aws_infra, mock_stripe_checkout):
     created = client.post("/bookings/", json=_booking_payload(BookingType.personal_client_travels)).json()
     response = client.get(f"/bookings/{created['booking_id']}")
     assert response.status_code == 200
@@ -79,10 +248,10 @@ def test_get_booking_not_found(mock_aws_infra):
 
 def test_list_bookings_requires_admin(mock_aws_infra):
     response = client.get("/bookings/")
-    assert response.status_code in (401, 403)  # HTTPBearer's own missing-header response is 403
+    assert response.status_code in (401, 403)
 
 
-def test_list_bookings_with_admin_token(mock_aws_infra, admin_token):
+def test_list_bookings_with_admin_token(mock_aws_infra, admin_token, mock_stripe_checkout):
     client.post("/bookings/", json=_booking_payload(BookingType.genes_adult))
     response = client.get("/bookings/", headers={"Authorization": f"Bearer {admin_token}"})
     assert response.status_code == 200
@@ -91,7 +260,18 @@ def test_list_bookings_with_admin_token(mock_aws_infra, admin_token):
     assert body[0]["booking_type"] == "genes_adult"
 
 
-def test_list_bookings_search_filters_by_name(mock_aws_infra, admin_token):
+def test_list_bookings_excludes_slot_claim_records(mock_aws_infra, admin_token, mock_stripe_checkout):
+    """Slot claims live in the SAME table as real bookings — this confirms
+    the list endpoint filters them out and never shows a synthetic
+    'personal-slot#...' entry as if it were a real booking a client made."""
+    client.post("/bookings/", json=_booking_payload(BookingType.personal_client_travels))
+    response = client.get("/bookings/", headers={"Authorization": f"Bearer {admin_token}"})
+    body = response.json()
+    assert len(body) == 1
+    assert not any(b["booking_id"].startswith("personal-slot#") for b in body)
+
+
+def test_list_bookings_search_filters_by_name(mock_aws_infra, admin_token, mock_stripe_checkout):
     client.post("/bookings/", json=_booking_payload(BookingType.genes_adult, name="Alice Boxer"))
     client.post("/bookings/", json=_booking_payload(BookingType.genes_adult, name="Bob Fighter"))
     response = client.get(
@@ -102,7 +282,7 @@ def test_list_bookings_search_filters_by_name(mock_aws_infra, admin_token):
     assert body[0]["name"] == "Alice Boxer"
 
 
-def test_cancel_booking_admin(mock_aws_infra, admin_token):
+def test_cancel_booking_admin(mock_aws_infra, admin_token, mock_stripe_checkout):
     created = client.post("/bookings/", json=_booking_payload(BookingType.genes_kids)).json()
     response = client.patch(
         f"/bookings/{created['booking_id']}/cancel",
@@ -112,11 +292,7 @@ def test_cancel_booking_admin(mock_aws_infra, admin_token):
     assert response.json()["status"] == "cancelled"
 
 
-def test_cancel_already_cancelled_booking_rejected(mock_aws_infra, admin_token):
-    """Confirms the double-cancel guard actually works — first cancel
-    succeeds, second attempt on the SAME booking must be rejected with 409,
-    not silently succeed again (which would, once emails are wired in,
-    re-trigger duplicate cancellation notices to both Debo and the client)."""
+def test_cancel_already_cancelled_booking_rejected(mock_aws_infra, admin_token, mock_stripe_checkout):
     created = client.post("/bookings/", json=_booking_payload(BookingType.genes_kids)).json()
     headers = {"Authorization": f"Bearer {admin_token}"}
 
@@ -135,7 +311,7 @@ def test_cancel_booking_not_found(mock_aws_infra, admin_token):
     assert response.status_code == 404
 
 
-def test_cancel_booking_requires_admin(mock_aws_infra):
+def test_cancel_booking_requires_admin(mock_aws_infra, mock_stripe_checkout):
     created = client.post("/bookings/", json=_booking_payload(BookingType.genes_kids)).json()
     response = client.patch(f"/bookings/{created['booking_id']}/cancel")
     assert response.status_code in (401, 403)
@@ -162,7 +338,7 @@ def test_repository_rejects_duplicate_booking_id(mock_aws_infra):
     }
     repo.create(item)
     with pytest.raises(ExternalServiceError):
-        repo.create(item)  # same booking_id again
+        repo.create(item)
 
 
 def test_cancel_completed_booking_still_succeeds(mock_aws_infra, admin_token):
@@ -194,19 +370,14 @@ def test_cancel_completed_booking_still_succeeds(mock_aws_infra, admin_token):
 def test_history_visibility_filter_excludes_past_bookings(mock_aws_infra, admin_token):
     """A booking more than 1hr past its start time should disappear from the
     admin LIST view, but remain fully fetchable by ID — the record is never
-    deleted, only hidden from the default list (see HISTORY_VISIBILITY_WINDOW
-    comment in routes/bookings.py for why this is a display filter, not a
-    deletion policy).
+    deleted, only hidden from the default list.
 
     NOTE: constructs the past time as today's date at 00:05 UTC, which is
     safely >1hr in the past for any test run after ~01:05 UTC — the only
     edge case this doesn't cover is a test suite run in the first ~65
-    minutes of the UTC day, which is an accepted, extremely low-probability
-    gap rather than something worth writing significantly more complex
-    date-rollover-safe logic for."""
+    minutes of the UTC day, an accepted, extremely low-probability gap."""
     from src.api.core.bookings_repository import BookingRepository
     from src.api.core.database import get_db_service
-    from datetime import datetime, timezone
 
     repo = BookingRepository(get_db_service())
     today = datetime.now(timezone.utc).date()
@@ -220,11 +391,9 @@ def test_history_visibility_filter_excludes_past_bookings(mock_aws_infra, admin_
     }
     repo.create(past_item)
 
-    # Still individually fetchable — history filter only applies to the LIST view
     get_response = client.get(f"/bookings/{past_item['booking_id']}")
     assert get_response.status_code == 200
 
-    # But excluded from the admin list
     list_response = client.get("/bookings/", headers={"Authorization": f"Bearer {admin_token}"})
     booking_ids = [b["booking_id"] for b in list_response.json()]
     assert past_item["booking_id"] not in booking_ids
@@ -235,4 +404,4 @@ def test_list_bookings_invalid_day_of_week_rejected(mock_aws_infra, admin_token)
         "/bookings/", params={"day_of_week": "someday"},
         headers={"Authorization": f"Bearer {admin_token}"},
     )
-    assert response.status_code == 400  # generic AppError handler
+    assert response.status_code == 400

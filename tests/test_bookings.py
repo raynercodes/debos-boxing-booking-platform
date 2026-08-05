@@ -111,6 +111,21 @@ def test_cancel_booking_admin(mock_aws_infra, admin_token):
     assert response.json()["status"] == "cancelled"
 
 
+def test_cancel_already_cancelled_booking_rejected(mock_aws_infra, admin_token):
+    """Confirms the double-cancel guard actually works — first cancel
+    succeeds, second attempt on the SAME booking must be rejected with 409,
+    not silently succeed again (which would, once emails are wired in,
+    re-trigger duplicate cancellation notices to both Debo and the client)."""
+    created = client.post("/bookings/", json=_booking_payload(BookingType.genes_kids)).json()
+    headers = {"Authorization": f"Bearer {admin_token}"}
+
+    first = client.patch(f"/bookings/{created['booking_id']}/cancel", headers=headers)
+    assert first.status_code == 200
+
+    second = client.patch(f"/bookings/{created['booking_id']}/cancel", headers=headers)
+    assert second.status_code == 409
+
+
 def test_cancel_booking_not_found(mock_aws_infra, admin_token):
     response = client.patch(
         "/bookings/00000000-0000-0000-0000-000000000000/cancel",

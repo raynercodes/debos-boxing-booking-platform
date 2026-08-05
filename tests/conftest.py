@@ -29,7 +29,7 @@ TEST_ENV_VARS = {
     "JWT_SECRET_PATH": "/debos-boxing/test/jwt-secret",
     "ADMIN_CREDENTIALS_PATH": "/debos-boxing/test/admin-credentials",
     "PASSWORD_PEPPER_PATH": "/debos-boxing/test/password-pepper",
-    "ADMIN_EMAIL": "admin@debosboxingandfitness.com",
+    "ADMIN_EMAIL": "test-admin@example-test.invalid",
 }
 
 

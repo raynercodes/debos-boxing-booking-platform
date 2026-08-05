@@ -77,34 +77,44 @@ class BookingRepository:
             logger.error("Failed to query bookings for %s: %s", session_date, exc, exc_info=True)
             raise ExternalServiceError("Unable to retrieve bookings") from exc
 
-    def update_status(self, booking_id: str, new_status: str) -> dict:
-        """No ConditionExpression restricting which PRIOR status is valid —
-        unlike fintech's loan state machine, cancellation here is explicitly
-        allowed "at any time" regardless of current status (confirmed,
-        already completed, even already cancelled). The ONLY condition is
-        that the booking actually exists — attribute_exists(booking_id)
-        guards against silently "updating" something that was never there,
-        which would otherwise succeed and return a fabricated-looking
-        response for a booking_id that was never real."""
+    def cancel(self, booking_id: str) -> dict:
+        """Atomically cancels a booking, but ONLY if it exists AND isn't
+        already cancelled — both checks happen in ONE ConditionExpression,
+        not as a separate get-then-update pair of calls. That matters for
+        a real reason, not just tidiness: two separate calls have a race
+        window (e.g. an admin double-clicking Cancel, or two browser tabs)
+        where both checks could pass before either write happens, letting
+        a second cancellation slip through and — once cancellation emails
+        are wired in — send a duplicate cancellation notice to both Debo
+        and the client. A single atomic conditional write closes that
+        window entirely.
+
+        DynamoDB doesn't report WHICH half of a compound condition failed,
+        only that the condition failed overall — so on failure, a follow-up
+        get_item disambiguates "doesn't exist" from "already cancelled"
+        purely to return a precise error message. The write path itself
+        (the common, successful case) is still a single atomic call."""
         try:
             result = self._db.bookings_table.update_item(
                 Key={"booking_id": booking_id},
                 UpdateExpression="SET #s = :new_status",
-                ConditionExpression="attribute_exists(booking_id)",
+                ConditionExpression="attribute_exists(booking_id) AND #s <> :cancelled_status",
                 ExpressionAttributeNames={"#s": "status"},
-                ExpressionAttributeValues={":new_status": new_status},
+                ExpressionAttributeValues={
+                    ":new_status": "cancelled",
+                    ":cancelled_status": "cancelled",
+                },
                 ReturnValues="ALL_NEW",
             )
-            return result["Attributes"]
+            return {"outcome": "cancelled", "item": result["Attributes"]}
         except ClientError as exc:
             if exc.response["Error"]["Code"] == "ConditionalCheckFailedException":
-                # Caller (the route) is responsible for translating a None-ish
-                # signal into BookingNotFoundError — we raise a distinct,
-                # narrow exception here so the route can tell "doesn't exist"
-                # apart from "AWS call actually failed."
-                return None
-            logger.error("Failed to update booking %s status: %s", booking_id, exc, exc_info=True)
-            raise ExternalServiceError("Unable to update booking") from exc
+                existing = self.get_by_id(booking_id)
+                if existing is None:
+                    return {"outcome": "not_found"}
+                return {"outcome": "already_cancelled", "item": existing}
+            logger.error("Failed to cancel booking %s: %s", booking_id, exc, exc_info=True)
+            raise ExternalServiceError("Unable to cancel booking") from exc
         except BotoCoreError as exc:
-            logger.error("Failed to update booking %s status: %s", booking_id, exc, exc_info=True)
-            raise ExternalServiceError("Unable to update booking") from exc
+            logger.error("Failed to cancel booking %s: %s", booking_id, exc, exc_info=True)
+            raise ExternalServiceError("Unable to cancel booking") from exc

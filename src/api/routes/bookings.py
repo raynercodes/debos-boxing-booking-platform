@@ -35,6 +35,17 @@ class BookingNotFoundError(AppError):
     specifically instead of the catch-all AppError's 400."""
 
 
+class BookingAlreadyCancelledError(AppError):
+    """A specific 409 (Conflict) case. Confirmed requirement: the UI should
+    only ever offer "cancel" as an option when a booking ISN'T already
+    cancelled — but per the same defense-in-depth principle applied
+    everywhere else in this file, the backend enforces this independently
+    too, not just the frontend. This is also what prevents a real duplicate-
+    email bug: once cancellation emails are wired in (to both Debo and the
+    client), a second cancel attempt on an already-cancelled booking must
+    NOT re-trigger those emails."""
+
+
 def require_admin(credentials=Depends(bearer_scheme)):
     """Delegates to SecurityService, which raises InvalidTokenError on
     failure — translated to a 401 by the global exception handler in
@@ -200,14 +211,21 @@ async def get_booking(booking_id: str):
     dependencies=[Depends(require_admin)],
 )
 async def cancel_booking(booking_id: str):
-    # No ConditionExpression restricting which prior status is valid — see
-    # BookingRepository.update_status docstring. Cancellation is explicitly
-    # allowed "at any time," no state-machine restriction, matching what
-    # was actually asked for (unlike fintech's loan status transitions).
-    updated = _get_repository().update_status(booking_id, BookingStatus.cancelled.value)
-    if updated is None:
+    # Atomic cancel — see BookingRepository.cancel docstring for why this is
+    # ONE conditional write rather than a separate check-then-update pair.
+    result = _get_repository().cancel(booking_id)
+
+    if result["outcome"] == "not_found":
         raise BookingNotFoundError(f"Booking {booking_id} not found")
 
-    # TODO (future): trigger a cancellation notice email via SES
+    if result["outcome"] == "already_cancelled":
+        # No emails fire here — this is a rejected no-op, not a state change.
+        raise BookingAlreadyCancelledError(f"Booking {booking_id} is already cancelled")
+
+    # TODO (future, once SES is wired in): send TWO emails on successful
+    # cancellation — one to Debo confirming the cancellation happened, and
+    # one to the original booker (client) notifying them their session was
+    # cancelled. Both emails belong HERE, only on the "cancelled" outcome
+    # above, never on the "already_cancelled" rejection path.
     logger.info("Booking %s cancelled by admin", booking_id)
-    return _item_to_response(updated)
+    return _item_to_response(result["item"])

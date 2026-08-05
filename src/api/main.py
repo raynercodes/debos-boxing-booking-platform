@@ -11,7 +11,7 @@ from src.api.core.exceptions import (
     InvalidTokenError,
     ExternalServiceError,
 )
-from src.api.routes.bookings import BookingNotFoundError
+from src.api.routes.bookings import BookingNotFoundError, BookingAlreadyCancelledError
 from src.api.core.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -95,6 +95,16 @@ async def booking_not_found_handler(request: Request, exc: BookingNotFoundError)
     registration order. Listed here in logical proximity to its sibling
     error handlers rather than for any ordering reason."""
     return JSONResponse(status_code=404, content={"detail": str(exc)})
+
+
+@app.exception_handler(BookingAlreadyCancelledError)
+async def booking_already_cancelled_handler(request: Request, exc: BookingAlreadyCancelledError):
+    """409 Conflict — the request is well-formed and the resource exists,
+    but the current state (already cancelled) conflicts with the requested
+    action. That's a more precise status code than a generic 400, and lets
+    the Framer frontend distinguish "this genuinely failed" from "nothing
+    to do, it's already in that state" if it ever wants to."""
+    return JSONResponse(status_code=409, content={"detail": str(exc)})
 
 
 @app.exception_handler(AppError)

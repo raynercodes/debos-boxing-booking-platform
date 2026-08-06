@@ -69,6 +69,8 @@ class StripeService:
         booking_id: str,
         price_usd: int,
         booking_type_label: str,
+        session_date: str,
+        session_time: str,
         customer_email: str,
         success_url: str,
         cancel_url: str,
@@ -85,7 +87,13 @@ class StripeService:
         what our OWN webhook handler actually reads programmatically to
         know which booking this payment belongs to. Redundant on purpose,
         for two different audiences (a human looking at Stripe's dashboard
-        vs. our own code)."""
+        vs. our own code).
+
+        session_date/session_time go into the line item's `description` —
+        without this, the Stripe checkout page just shows a generic label
+        like "Genes Adult" with no indication of WHICH date/time the client
+        is actually paying for. A client should see clear confirmation of
+        what they picked before handing over a card number."""
         stripe.api_key = self.api_key
         try:
             session = stripe.checkout.Session.create(
@@ -94,7 +102,10 @@ class StripeService:
                 line_items=[{
                     "price_data": {
                         "currency": "usd",
-                        "product_data": {"name": f"Debo's Boxing and Fitness — {booking_type_label}"},
+                        "product_data": {
+                            "name": f"Debo's Boxing and Fitness — {booking_type_label}",
+                            "description": f"Session on {session_date} at {session_time}",
+                        },
                         "unit_amount": price_usd * 100,  # Stripe expects cents, not dollars
                     },
                     "quantity": 1,

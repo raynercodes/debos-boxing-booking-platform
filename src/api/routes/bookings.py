@@ -179,6 +179,8 @@ async def create_booking(request: BookingRequest):
             booking_id=booking_id,
             price_usd=price_usd,
             booking_type_label=booking_type.value.replace("_", " ").title(),
+            session_date=request.session_date,
+            session_time=request.session_time,
             customer_email=request.email,
             success_url=f"{base_url}/booking-confirmed?booking_id={booking_id}",
             cancel_url=f"{base_url}/booking-cancelled?booking_id={booking_id}",

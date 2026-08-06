@@ -104,7 +104,7 @@ class StripeService:
                         "currency": "usd",
                         "product_data": {
                             "name": f"Debo's Boxing and Fitness — {booking_type_label}",
-                            "description": f"Session on {session_date} at {session_time}",
+                            "description": f"Once you confirm your booking, you'll be scheduled for a session on {session_date} at {session_time} — please arrive on time and ready to train!",
                         },
                         "unit_amount": price_usd * 100,  # Stripe expects cents, not dollars
                     },

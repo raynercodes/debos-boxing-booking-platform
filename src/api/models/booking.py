@@ -112,11 +112,17 @@ BOOKING_TYPE_RULES: Dict[BookingType, dict] = {
 KIDS_AGE_RANGE = "6-13"  # confirmed — used for the UI label, e.g. "Kids (ages 6-13)"
 
 # How long a Stripe Checkout Session stays valid before it expires unpaid.
-# Long enough to actually complete a payment, short enough that an
-# abandoned checkout doesn't block a real Personal slot for hours. This is
-# a reasonable engineering default, not a business-confirmed number — easy
-# to tune later without touching anything else in the system.
-CHECKOUT_SESSION_EXPIRY_MINUTES = 20
+# 30 is Stripe's own HARD MINIMUM — Stripe rejects anything shorter with a
+# real API error ("expires_at must be at least 30 minutes from Checkout
+# Session creation"). This was originally set to 20 based on "reasonable
+# default" reasoning without checking Stripe's actual constraint, which our
+# mocked test suite couldn't catch (it fakes the Stripe API call entirely,
+# never exercising Stripe's own validation) — only surfaced once tested
+# against the real (test-mode) API. 30 also happens to still satisfy the
+# original intent (long enough to pay, short enough not to block a real
+# Personal slot for hours) — it just needed to be Stripe's actual floor,
+# not an arbitrary smaller number.
+CHECKOUT_SESSION_EXPIRY_MINUTES = 30
 
 
 class BookingRequest(BaseModel):

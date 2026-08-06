@@ -3,7 +3,7 @@ from datetime import datetime
 from enum import Enum
 from typing import ClassVar, Dict, Set, Tuple, Optional
 
-from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
+from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator, ConfigDict
 
 # E.164-ish: optional leading +, then 7-15 digits. Covers US numbers with or
 # without country code, and international numbers, without being so strict
@@ -126,6 +126,28 @@ CHECKOUT_SESSION_EXPIRY_MINUTES = 30
 
 
 class BookingRequest(BaseModel):
+    # Pre-fills Swagger UI's "Try it out" form at /docs with a realistic
+    # example — the date below is static (baked in at code-write time), so
+    # it won't always fall on a currently-valid weekday. session_date may
+    # still need a quick nudge before hitting Execute, but name/phone/time
+    # never need retyping. mobile_personal + client_travels was picked as
+    # the example combo specifically because it's valid Mon-Fri, the
+    # broadest window of any offering, minimizing how often the date needs
+    # adjusting.
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "name": "Test Client",
+                "email": "test@example.com",
+                "phone": "4045551234",
+                "session_date": "2026-08-10",
+                "session_time": "07:00",
+                "location": "mobile_personal",
+                "session_detail": "client_travels",
+            }
+        }
+    )
+
     name: str = Field(..., min_length=1, max_length=100)
     email: EmailStr
     # Deliberately a str, not an int — phone numbers aren't numbers you do

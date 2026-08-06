@@ -1,3 +1,16 @@
+#!/usr/bin/env bash
+set -e
+
+# Run this FROM INSIDE your existing debos-boxing-booking-platform folder.
+#
+# Fixes a real bug found via real CloudWatch logs: ALL application logging
+# was silently swallowed in the deployed Lambda (not just the webhook) -
+# logging.basicConfig() no-ops when Lambda's runtime already attached a
+# root logger handler, which it always does. force=True fixes it.
+
+echo "Applying Lambda logging fix..."
+
+cat > src/api/core/logging_config.py << 'FILEEOF'
 """
 Shared logging setup.
 
@@ -52,3 +65,21 @@ def get_logger(name: str) -> logging.Logger:
     guarantees the shared format is applied first."""
     _configure_once()
     return logging.getLogger(name)
+FILEEOF
+
+echo "File updated. Running full test suite..."
+python3 -m pip install -r requirements-dev.txt
+python3 -m pytest tests/ -v
+
+echo ""
+echo "If all tests pass, review before committing:"
+echo "  git status"
+echo "  git diff"
+echo ""
+echo "Then commit (still on dev):"
+echo "  git add ."
+echo "  git commit -m 'Fix Lambda logging - basicConfig needs force=True since Lambda pre-attaches a root handler'"
+echo "  git push"
+echo ""
+echo "Once confirmed on dev, remove this script:"
+echo "  rm fix_lambda_logging.sh"

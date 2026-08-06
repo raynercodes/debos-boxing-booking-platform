@@ -25,8 +25,14 @@ Parameters:
     Description: >
       ACM cert ARN, same region as this stack, for the API Gateway Regional
       custom domain. Must be validated BEFORE this stack deploys with
-      IsProd — ACM validation is a separate, manual (DNS record) step done
-      once ahead of time, not something CloudFormation can wait on inline.
+      staging or prod — ACM validation is a separate, manual (DNS record)
+      step done once ahead of time, not something CloudFormation can wait
+      on inline. RECOMMENDATION: request ONE wildcard cert for
+      "*.debosboxingandfitness.com" rather than two separate certs — it
+      covers both api.debosboxingandfitness.com (prod) and
+      staging-api.debosboxingandfitness.com (staging) with a single DNS
+      validation round instead of two, and this same parameter value works
+      for both environments.
 
   AdminEmail:
     Type: String
@@ -44,6 +50,13 @@ Parameters:
 
 Conditions:
   IsProd: !Equals [!Ref Environment, "prod"]
+  # Staging needs a stable custom domain too — not just prod. A Framer
+  # staging site needs a URL it can hardcode permanently, and the raw
+  # AWS-generated execute-api URL, while USUALLY stable across ordinary
+  # deploys, isn't something worth relying on long-term for anything
+  # externally-facing. dev deliberately stays on the raw URL — nothing
+  # external (no staging Framer clone) is ever expected to point at dev.
+  IsStagingOrProd: !Or [!Condition IsProd, !Equals [!Ref Environment, "staging"]]
   DeployCloudFront: !And [!Condition IsProd, !Equals [!Ref EnableCloudFront, "true"]]
 
 Globals:
@@ -369,16 +382,17 @@ Resources:
 
   # -------------------------------------------------------
   # API Gateway Regional Custom Domain — works TODAY regardless of whether
-  # this AWS account has CloudFront access yet. This is the piece that
-  # unblocks a real custom domain (api.debosboxingandfitness.com) even if
-  # the CloudFront verification support case takes weeks to clear, same
-  # lesson learned from the fintech account.
+  # this AWS account has CloudFront access yet. Covers BOTH staging and
+  # prod (not just prod) — a Framer staging site needs a stable URL to
+  # point at permanently, same reasoning as prod, just a different
+  # subdomain. dev intentionally has no custom domain — nothing external
+  # is ever expected to point at dev specifically.
   # -------------------------------------------------------
   RegionalDomainName:
     Type: AWS::ApiGateway::DomainName
-    Condition: IsProd
+    Condition: IsStagingOrProd
     Properties:
-      DomainName: api.debosboxingandfitness.com
+      DomainName: !If [IsProd, "api.debosboxingandfitness.com", "staging-api.debosboxingandfitness.com"]
       RegionalCertificateArn: !Ref RegionalCustomDomainCertArn
       EndpointConfiguration:
         Types:
@@ -387,7 +401,7 @@ Resources:
 
   RegionalDomainMapping:
     Type: AWS::ApiGateway::BasePathMapping
-    Condition: IsProd
+    Condition: IsStagingOrProd
     Properties:
       DomainName: !Ref RegionalDomainName
       RestApiId: !Ref BookingApi
@@ -579,7 +593,7 @@ Outputs:
       Name: !Sub debos-boxing-api-url-${Environment}
 
   RegionalDomainTarget:
-    Condition: IsProd
+    Condition: IsStagingOrProd
     Description: "Add this as a CNAME record at Namecheap for api.debosboxingandfitness.com"
     Value: !GetAtt RegionalDomainName.RegionalDomainName
     Export:

@@ -11,7 +11,7 @@ router = APIRouter()
 
 
 @router.post(
-    "/",
+    "",
     response_model=LeadResponse,
     status_code=201,
     summary="Capture Lead",

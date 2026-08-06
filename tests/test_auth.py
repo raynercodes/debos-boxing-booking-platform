@@ -94,12 +94,12 @@ def test_login_success_clears_prior_failed_attempts(mock_aws_infra):
 
 
 def test_protected_endpoint_rejects_missing_token(mock_aws_infra):
-    response = client.get("/bookings/")
+    response = client.get("/bookings")
     assert response.status_code in (401, 403)  # HTTPBearer's own missing-header response is 403
 
 
 def test_protected_endpoint_rejects_malformed_token(mock_aws_infra):
-    response = client.get("/bookings/", headers={"Authorization": "Bearer this-is-not-a-real-jwt"})
+    response = client.get("/bookings", headers={"Authorization": "Bearer this-is-not-a-real-jwt"})
     assert response.status_code == 401
 
 
@@ -109,5 +109,5 @@ def test_protected_endpoint_rejects_token_signed_with_wrong_secret(mock_aws_infr
     signature, not just that the string parses as a JWT shape."""
     import jwt as pyjwt
     fake_token = pyjwt.encode({"role": "admin"}, "wrong-secret-entirely", algorithm="HS256")
-    response = client.get("/bookings/", headers={"Authorization": f"Bearer {fake_token}"})
+    response = client.get("/bookings", headers={"Authorization": f"Bearer {fake_token}"})
     assert response.status_code == 401

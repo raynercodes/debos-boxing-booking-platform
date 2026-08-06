@@ -33,6 +33,14 @@ app = FastAPI(
                 "Internal/staging use — the real frontend is the Framer site.",
     version="1.0.0",
     root_path=ROOT_PATH,
+    # Disabled deliberately, after a real production issue: FastAPI/Starlette's
+    # default trailing-slash auto-redirect (307) is invisible in our own test
+    # suite (TestClient follows redirects silently), but real external callers
+    # often don't — most critically, Stripe's webhook delivery and some fetch()
+    # configurations don't reliably follow redirects on POST. With this off,
+    # a path either matches exactly or returns a clean 404 — no silent
+    # redirect that could make a real booking/lead/webhook call quietly fail.
+    redirect_slashes=False,
 )
 
 

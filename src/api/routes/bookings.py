@@ -132,7 +132,7 @@ def _is_past_visibility_window(item: dict) -> bool:
 
 
 @router.post(
-    "/",
+    "",
     response_model=BookingCheckoutResponse,
     status_code=201,
     summary="Create Booking (starts Stripe checkout)",
@@ -232,7 +232,7 @@ async def create_booking(request: BookingRequest):
 
 
 @router.get(
-    "/",
+    "",
     summary="List Upcoming Bookings (Admin)",
     description="Admin-only. Filters: day_of_week, search (name/phone). "
                 "Auto-excludes bookings more than 1hr past their start time.",

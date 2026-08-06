@@ -88,7 +88,7 @@ def _confirm_via_webhook(booking_id: str, mock_stripe_webhook_verify):
 def test_create_booking_starts_checkout_not_confirmed(mock_aws_infra, mock_stripe_checkout):
     """Creation should NEVER confirm a booking directly — this is the core
     guarantee the whole payment-gating requirement rests on."""
-    response = client.post("/bookings/", json=_booking_payload(BookingType.genes_kids))
+    response = client.post("/bookings", json=_booking_payload(BookingType.genes_kids))
     assert response.status_code == 201
     body = response.json()
     assert body["status"] == "processing"
@@ -100,14 +100,14 @@ def test_create_booking_invalid_location_detail_combo(mock_aws_infra):
     """genes + client_travels isn't a real offering — rejected at the API
     boundary (422), never even reaching Stripe."""
     payload = _booking_payload(BookingType.genes_kids, session_detail="client_travels")
-    response = client.post("/bookings/", json=payload)
+    response = client.post("/bookings", json=payload)
     assert response.status_code == 422
 
 
 def test_create_personal_virtual_booking_priced_correctly(mock_aws_infra, mock_stripe_checkout):
     """The new Zoom option — confirmed $40, matching client_travels pricing
     (Debo reasoned no gas cost either way)."""
-    response = client.post("/bookings/", json=_booking_payload(BookingType.personal_virtual))
+    response = client.post("/bookings", json=_booking_payload(BookingType.personal_virtual))
     assert response.status_code == 201
     assert response.json()["price_usd"] == 40
 
@@ -115,7 +115,7 @@ def test_create_personal_virtual_booking_priced_correctly(mock_aws_infra, mock_s
 # --- Webhook confirmation flow ----------------------------------------------
 
 def test_webhook_confirms_booking_on_successful_payment(mock_aws_infra, mock_stripe_checkout, mock_stripe_webhook_verify):
-    created = client.post("/bookings/", json=_booking_payload(BookingType.genes_adult)).json()
+    created = client.post("/bookings", json=_booking_payload(BookingType.genes_adult)).json()
     _confirm_via_webhook(created["booking_id"], mock_stripe_webhook_verify)
 
     booking = client.get(f"/bookings/{created['booking_id']}").json()
@@ -135,7 +135,7 @@ def test_webhook_expiry_releases_personal_slot(mock_aws_infra, mock_stripe_check
     without this, an abandoned cart would permanently block a real Personal
     time slot forever."""
     payload = _booking_payload(BookingType.personal_client_travels)
-    created = client.post("/bookings/", json=payload).json()
+    created = client.post("/bookings", json=payload).json()
 
     mock_stripe_webhook_verify.return_value = {
         "type": "checkout.session.expired",
@@ -145,7 +145,7 @@ def test_webhook_expiry_releases_personal_slot(mock_aws_infra, mock_stripe_check
 
     # Slot should now be free — a new booking for the SAME date/time/type
     # should succeed, not be rejected as taken/processing.
-    second_attempt = client.post("/bookings/", json=payload)
+    second_attempt = client.post("/bookings", json=payload)
     assert second_attempt.status_code == 201
 
 
@@ -158,10 +158,10 @@ def test_personal_slot_claimed_by_first_request_blocks_second(mock_aws_infra, mo
     currently being processed."""
     payload = _booking_payload(BookingType.personal_trainer_travels)
 
-    first = client.post("/bookings/", json=payload)
+    first = client.post("/bookings", json=payload)
     assert first.status_code == 201
 
-    second = client.post("/bookings/", json=payload)
+    second = client.post("/bookings", json=payload)
     assert second.status_code == 409
     assert "try again shortly" in second.json()["detail"].lower()
 
@@ -173,10 +173,10 @@ def test_personal_slot_confirmed_blocks_new_booking_with_different_message(
     attempt at the same date+time should get the FINAL rejection message,
     distinct from the 'try again shortly' one."""
     payload = _booking_payload(BookingType.personal_client_travels)
-    first = client.post("/bookings/", json=payload).json()
+    first = client.post("/bookings", json=payload).json()
     _confirm_via_webhook(first["booking_id"], mock_stripe_webhook_verify)
 
-    second = client.post("/bookings/", json=payload)
+    second = client.post("/bookings", json=payload)
     assert second.status_code == 409
     assert "taken" in second.json()["detail"].lower()
 
@@ -191,10 +191,10 @@ def test_different_personal_delivery_methods_still_block_each_other(mock_aws_inf
     client_travels_payload = _booking_payload(BookingType.personal_client_travels, session_date=date)
     virtual_payload = _booking_payload(BookingType.personal_virtual, session_date=date)
 
-    first = client.post("/bookings/", json=client_travels_payload)
+    first = client.post("/bookings", json=client_travels_payload)
     assert first.status_code == 201
 
-    second = client.post("/bookings/", json=virtual_payload)
+    second = client.post("/bookings", json=virtual_payload)
     assert second.status_code == 409  # different delivery method, SAME time — still blocked
 
 
@@ -204,8 +204,8 @@ def test_genes_bookings_never_slot_claimed_multiple_allowed(mock_aws_infra, mock
     Gene's adult class time should both succeed."""
     payload = _booking_payload(BookingType.genes_adult)
 
-    first = client.post("/bookings/", json=payload)
-    second = client.post("/bookings/", json={**payload, "name": "Second Client", "email": "second@example.com"})
+    first = client.post("/bookings", json=payload)
+    second = client.post("/bookings", json={**payload, "name": "Second Client", "email": "second@example.com"})
 
     assert first.status_code == 201
     assert second.status_code == 201  # NOT blocked — group class, multiple bookings allowed
@@ -223,7 +223,7 @@ def test_cancelling_confirmed_personal_booking_does_not_release_slot(
     cancel_booking for the full case (this only affects the ONE cancelled
     date+time, not future weeks at the same time)."""
     payload = _booking_payload(BookingType.personal_trainer_travels)
-    created = client.post("/bookings/", json=payload).json()
+    created = client.post("/bookings", json=payload).json()
     _confirm_via_webhook(created["booking_id"], mock_stripe_webhook_verify)
 
     cancel_response = client.patch(
@@ -235,14 +235,14 @@ def test_cancelling_confirmed_personal_booking_does_not_release_slot(
 
     # The slot should STILL be blocked — a new booking attempt for the same
     # exact date+time+type must be rejected, not allowed through.
-    retry = client.post("/bookings/", json=payload)
+    retry = client.post("/bookings", json=payload)
     assert retry.status_code == 409
 
 
 # --- Retrieval / listing / cancellation (updated for checkout-based creation) ---
 
 def test_get_booking_by_id(mock_aws_infra, mock_stripe_checkout):
-    created = client.post("/bookings/", json=_booking_payload(BookingType.personal_client_travels)).json()
+    created = client.post("/bookings", json=_booking_payload(BookingType.personal_client_travels)).json()
     response = client.get(f"/bookings/{created['booking_id']}")
     assert response.status_code == 200
     assert response.json()["booking_id"] == created["booking_id"]
@@ -254,13 +254,13 @@ def test_get_booking_not_found(mock_aws_infra):
 
 
 def test_list_bookings_requires_admin(mock_aws_infra):
-    response = client.get("/bookings/")
+    response = client.get("/bookings")
     assert response.status_code in (401, 403)
 
 
 def test_list_bookings_with_admin_token(mock_aws_infra, admin_token, mock_stripe_checkout):
-    client.post("/bookings/", json=_booking_payload(BookingType.genes_adult))
-    response = client.get("/bookings/", headers={"Authorization": f"Bearer {admin_token}"})
+    client.post("/bookings", json=_booking_payload(BookingType.genes_adult))
+    response = client.get("/bookings", headers={"Authorization": f"Bearer {admin_token}"})
     assert response.status_code == 200
     body = response.json()
     assert len(body) == 1
@@ -271,18 +271,18 @@ def test_list_bookings_excludes_slot_claim_records(mock_aws_infra, admin_token, 
     """Slot claims live in the SAME table as real bookings — this confirms
     the list endpoint filters them out and never shows a synthetic
     'personal-slot#...' entry as if it were a real booking a client made."""
-    client.post("/bookings/", json=_booking_payload(BookingType.personal_client_travels))
-    response = client.get("/bookings/", headers={"Authorization": f"Bearer {admin_token}"})
+    client.post("/bookings", json=_booking_payload(BookingType.personal_client_travels))
+    response = client.get("/bookings", headers={"Authorization": f"Bearer {admin_token}"})
     body = response.json()
     assert len(body) == 1
     assert not any(b["booking_id"].startswith("personal-slot#") for b in body)
 
 
 def test_list_bookings_search_filters_by_name(mock_aws_infra, admin_token, mock_stripe_checkout):
-    client.post("/bookings/", json=_booking_payload(BookingType.genes_adult, name="Alice Boxer"))
-    client.post("/bookings/", json=_booking_payload(BookingType.genes_adult, name="Bob Fighter"))
+    client.post("/bookings", json=_booking_payload(BookingType.genes_adult, name="Alice Boxer"))
+    client.post("/bookings", json=_booking_payload(BookingType.genes_adult, name="Bob Fighter"))
     response = client.get(
-        "/bookings/", params={"search": "alice"}, headers={"Authorization": f"Bearer {admin_token}"}
+        "/bookings", params={"search": "alice"}, headers={"Authorization": f"Bearer {admin_token}"}
     )
     body = response.json()
     assert len(body) == 1
@@ -290,7 +290,7 @@ def test_list_bookings_search_filters_by_name(mock_aws_infra, admin_token, mock_
 
 
 def test_cancel_booking_admin(mock_aws_infra, admin_token, mock_stripe_checkout):
-    created = client.post("/bookings/", json=_booking_payload(BookingType.genes_kids)).json()
+    created = client.post("/bookings", json=_booking_payload(BookingType.genes_kids)).json()
     response = client.patch(
         f"/bookings/{created['booking_id']}/cancel",
         headers={"Authorization": f"Bearer {admin_token}"},
@@ -302,7 +302,7 @@ def test_cancel_booking_admin(mock_aws_infra, admin_token, mock_stripe_checkout)
 def test_cancel_booking_without_reason_uses_default(mock_aws_infra, admin_token, mock_stripe_checkout):
     """No body sent at all — should fall back to the documented default,
     not a blank/null value."""
-    created = client.post("/bookings/", json=_booking_payload(BookingType.genes_kids)).json()
+    created = client.post("/bookings", json=_booking_payload(BookingType.genes_kids)).json()
     response = client.patch(
         f"/bookings/{created['booking_id']}/cancel",
         headers={"Authorization": f"Bearer {admin_token}"},
@@ -313,7 +313,7 @@ def test_cancel_booking_without_reason_uses_default(mock_aws_infra, admin_token,
 def test_cancel_booking_with_blank_reason_uses_default(mock_aws_infra, admin_token, mock_stripe_checkout):
     """An explicitly blank/whitespace reason should be treated the same as
     not sending one at all — not stored as an empty string."""
-    created = client.post("/bookings/", json=_booking_payload(BookingType.genes_kids)).json()
+    created = client.post("/bookings", json=_booking_payload(BookingType.genes_kids)).json()
     response = client.patch(
         f"/bookings/{created['booking_id']}/cancel",
         json={"reason": "   "},
@@ -323,7 +323,7 @@ def test_cancel_booking_with_blank_reason_uses_default(mock_aws_infra, admin_tok
 
 
 def test_cancel_booking_with_custom_reason_is_stored(mock_aws_infra, admin_token, mock_stripe_checkout):
-    created = client.post("/bookings/", json=_booking_payload(BookingType.genes_kids)).json()
+    created = client.post("/bookings", json=_booking_payload(BookingType.genes_kids)).json()
     response = client.patch(
         f"/bookings/{created['booking_id']}/cancel",
         json={"reason": "Debo is sick today"},
@@ -333,7 +333,7 @@ def test_cancel_booking_with_custom_reason_is_stored(mock_aws_infra, admin_token
 
 
 def test_cancel_already_cancelled_booking_rejected(mock_aws_infra, admin_token, mock_stripe_checkout):
-    created = client.post("/bookings/", json=_booking_payload(BookingType.genes_kids)).json()
+    created = client.post("/bookings", json=_booking_payload(BookingType.genes_kids)).json()
     headers = {"Authorization": f"Bearer {admin_token}"}
 
     first = client.patch(f"/bookings/{created['booking_id']}/cancel", headers=headers)
@@ -352,7 +352,7 @@ def test_cancel_booking_not_found(mock_aws_infra, admin_token):
 
 
 def test_cancel_booking_requires_admin(mock_aws_infra, mock_stripe_checkout):
-    created = client.post("/bookings/", json=_booking_payload(BookingType.genes_kids)).json()
+    created = client.post("/bookings", json=_booking_payload(BookingType.genes_kids)).json()
     response = client.patch(f"/bookings/{created['booking_id']}/cancel")
     assert response.status_code in (401, 403)
 
@@ -434,14 +434,14 @@ def test_history_visibility_filter_excludes_past_bookings(mock_aws_infra, admin_
     get_response = client.get(f"/bookings/{past_item['booking_id']}")
     assert get_response.status_code == 200
 
-    list_response = client.get("/bookings/", headers={"Authorization": f"Bearer {admin_token}"})
+    list_response = client.get("/bookings", headers={"Authorization": f"Bearer {admin_token}"})
     booking_ids = [b["booking_id"] for b in list_response.json()]
     assert past_item["booking_id"] not in booking_ids
 
 
 def test_list_bookings_invalid_day_of_week_rejected(mock_aws_infra, admin_token):
     response = client.get(
-        "/bookings/", params={"day_of_week": "someday"},
+        "/bookings", params={"day_of_week": "someday"},
         headers={"Authorization": f"Bearer {admin_token}"},
     )
     assert response.status_code == 400

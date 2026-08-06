@@ -12,3 +12,4 @@ package/*
 samconfig.toml
 *_update.sh
 setup_repo.sh
+*fix.sh

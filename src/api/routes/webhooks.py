@@ -20,19 +20,10 @@ from src.api.core.database import get_db_service
 from src.api.core.bookings_repository import BookingRepository
 from src.api.models.booking import BookingStatus, requires_slot_claim, BookingType
 from src.api.core.logging_config import get_logger
-from src.api.core.exceptions import AppError
+from src.api.core.exceptions import WebhookSignatureError
 
 logger = get_logger(__name__)
 router = APIRouter()
-
-
-class WebhookSignatureError(AppError):
-    """400, not 401/403 — Stripe's own webhook documentation expects a 4xx
-    on signature failure so it knows to stop retrying that specific event
-    rather than hammering the endpoint indefinitely. Kept as its own type
-    for the same reason every other specific error case in this project is:
-    a precise, intentional HTTP response rather than falling through to a
-    generic one."""
 
 
 @router.post(

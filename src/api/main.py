@@ -10,11 +10,12 @@ from src.api.core.exceptions import (
     LockedOutError,
     InvalidTokenError,
     ExternalServiceError,
+    BookingNotFoundError,
+    BookingAlreadyCancelledError,
+    SlotProcessingError,
+    SlotTakenError,
+    WebhookSignatureError,
 )
-from src.api.routes.bookings import (
-    BookingNotFoundError, BookingAlreadyCancelledError, SlotProcessingError, SlotTakenError,
-)
-from src.api.routes.webhooks import WebhookSignatureError
 from src.api.core.logging_config import get_logger
 
 logger = get_logger(__name__)

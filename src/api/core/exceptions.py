@@ -13,7 +13,7 @@ registered in main.py, rather than each route needing its own try/except.
 
 
 class AppError(Exception):
-    """Base class for all domain-level errors in this platform."""
+    """Base class for all domain-level errors in this project."""
 
 
 class InvalidCredentialsError(AppError):
@@ -43,3 +43,42 @@ class ExternalServiceError(AppError):
     client-facing response never leaks infrastructure detail, same uniform-
     messaging principle as InvalidCredentialsError, just extended to cover
     infra failures instead of auth failures."""
+
+
+class BookingNotFoundError(AppError):
+    """A specific 404 case — kept as its own type rather than reusing a
+    generic AppError so the exception handler in main.py can map it to 404
+    specifically instead of the catch-all AppError's 400."""
+
+
+class BookingAlreadyCancelledError(AppError):
+    """409 (Conflict). Confirmed requirement: the UI should only ever offer
+    "cancel" as an option when a booking ISN'T already cancelled — but per
+    the same defense-in-depth principle applied everywhere else, the
+    backend enforces this independently too, not just the frontend. This is
+    also what prevents a real duplicate-email bug: once cancellation emails
+    are wired in (to both Debo and the client), a second cancel attempt on
+    an already-cancelled booking must NOT re-trigger those emails."""
+
+
+class SlotProcessingError(AppError):
+    """409 — a Personal slot is currently being checked out by someone
+    else. Confirmed UX: 'this booking is currently being booked, it might
+    be available soon, try again later' — the person hasn't fully lost the
+    slot yet (the other checkout could still expire), just not right now."""
+
+
+class SlotTakenError(AppError):
+    """409 — a Personal slot is already CONFIRMED (paid) by someone else.
+    Confirmed UX: distinct message from SlotProcessingError — 'sorry, this
+    booking is taken, try another day or time' — this one is final, not a
+    'try again shortly' situation."""
+
+
+class WebhookSignatureError(AppError):
+    """400, not 401/403 — Stripe's own webhook documentation expects a 4xx
+    on signature failure so it knows to stop retrying that specific event
+    rather than hammering the endpoint indefinitely. Kept as its own type
+    for the same reason every other specific error case in this project is:
+    a precise, intentional HTTP response rather than falling through to a
+    generic one."""

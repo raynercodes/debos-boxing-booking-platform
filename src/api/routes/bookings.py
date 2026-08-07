@@ -131,7 +131,7 @@ async def create_booking(request: BookingRequest):
         claim_result = repo.claim_personal_slot(request.session_date, request.session_time, booking_id)
         if claim_result["outcome"] == "already_processing":
             raise SlotProcessingError(
-                "This booking is currently being processed. It might be available soon — try again shortly."
+                "This Session is currently being booked at this time. It might be available soon — check back shortly."
             )
         if claim_result["outcome"] == "already_confirmed":
             raise SlotTakenError(
@@ -297,7 +297,9 @@ async def cancel_booking(booking_id: str, request: Optional[CancelBookingRequest
 
     if result["outcome"] == "already_cancelled":
         # No emails fire here — this is a rejected no-op, not a state change.
-        raise BookingAlreadyCancelledError(f"Booking {booking_id} is already cancelled")
+        raise BookingAlreadyCancelledError(
+            f"Booking {booking_id} is already cancelled for your client: {result['item']['name']}"
+        )
 
     item = result["item"]
 

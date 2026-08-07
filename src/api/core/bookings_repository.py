@@ -79,6 +79,20 @@ class BookingRepository:
             logger.error("Failed to set booking %s status to %s: %s", booking_id, new_status, exc, exc_info=True)
             raise ExternalServiceError("Unable to update booking status") from exc
 
+    def mark_reminder_sent(self, booking_id: str) -> None:
+        """Used by the daily reminder job — prevents a re-run on the same
+        day (EventBridge scheduled rules can occasionally double-fire) from
+        sending a second reminder for the same booking."""
+        try:
+            self._db.bookings_table.update_item(
+                Key={"booking_id": booking_id},
+                UpdateExpression="SET reminder_sent = :true_val",
+                ExpressionAttributeValues={":true_val": True},
+            )
+        except (ClientError, BotoCoreError) as exc:
+            logger.error("Failed to mark reminder sent for booking %s: %s", booking_id, exc, exc_info=True)
+            raise ExternalServiceError("Unable to update reminder status") from exc
+
     def query_by_date(self, session_date: str) -> List[dict]:
         """One Query per exact date against the session-date-index GSI.
         Deliberately NOT a Scan — the admin week-view endpoint calls this

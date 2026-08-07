@@ -23,6 +23,7 @@ from moto import mock_aws
 import src.api.core.database as database_module
 import src.api.core.security as security_module
 import src.api.core.stripe_service as stripe_service_module
+import src.api.core.ses_service as ses_service_module
 
 TEST_ENV_VARS = {
     "ENVIRONMENT": "dev",
@@ -51,10 +52,12 @@ def reset_singletons():
     database_module._db_service = None
     security_module._security_service = None
     stripe_service_module._stripe_service = None
+    ses_service_module._ses_service = None
     yield
     database_module._db_service = None
     security_module._security_service = None
     stripe_service_module._stripe_service = None
+    ses_service_module._ses_service = None
 
 
 @pytest.fixture(autouse=True)
@@ -137,6 +140,14 @@ def mock_aws_infra(aws_test_env):
         # Reset again so actual test code gets a clean instance too, rather
         # than reusing internal state left over from computing the hash above.
         security_module._security_service = None
+
+        # Moto's SES mock enforces identity verification the same way real
+        # AWS does — send_email fails against an unverified identity. This
+        # verifies the domain WITHIN the mock so booking confirmation /
+        # cancellation / reminder emails succeed during tests, matching
+        # the real verified domain in production.
+        ses_client = boto3.client("ses", region_name="us-east-1")
+        ses_client.verify_domain_identity(Domain="debosboxingandfitness.com")
 
         yield ddb
 

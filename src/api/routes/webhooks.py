@@ -13,11 +13,13 @@ Stripe, which is a stronger and more specific guarantee than "someone has a
 valid admin token" would even be for this purpose.
 """
 
+import os
 from fastapi import APIRouter, Request
 
 from src.api.core.stripe_service import get_stripe_service
 from src.api.core.database import get_db_service
 from src.api.core.bookings_repository import BookingRepository
+from src.api.core.ses_service import get_ses_service
 from src.api.models.booking import BookingStatus, requires_slot_claim, BookingType
 from src.api.core.logging_config import get_logger
 from src.api.core.exceptions import WebhookSignatureError
@@ -67,10 +69,15 @@ async def stripe_webhook(request: Request):
         if requires_slot_claim(BookingType(booking["booking_type"])):
             repo.confirm_slot(booking["session_date"], booking["session_time"])
 
-        # TODO (future, once SES is wired in): send booking confirmation
-        # email to the client + new-booking notification to Debo, HERE —
-        # this is the only point that's actually verified-paid, so it's the
-        # correct place for confirmation emails to originate from.
+        # This is the ONLY point a booking is actually verified-paid, so
+        # it's the correct place for confirmation emails to originate from.
+        # booking dict here is the PRE-update snapshot (status still says
+        # "processing" in memory) — fine, since neither email body
+        # references the status field, only name/date/time/price.
+        ses = get_ses_service()
+        ses.send_booking_confirmation(booking)
+        ses.send_new_booking_notification(booking, admin_email=os.environ["ADMIN_EMAIL"])
+
         logger.info("Booking %s confirmed via Stripe webhook", booking_id)
 
     elif event["type"] == "checkout.session.expired":

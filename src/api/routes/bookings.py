@@ -14,6 +14,7 @@ from src.api.core.security import get_security_service
 from src.api.core.database import get_db_service
 from src.api.core.bookings_repository import BookingRepository
 from src.api.core.stripe_service import get_stripe_service
+from src.api.core.ses_service import get_ses_service
 from src.api.core.exceptions import (
     AppError, BookingNotFoundError, BookingAlreadyCancelledError,
     SlotProcessingError, SlotTakenError,
@@ -322,12 +323,15 @@ async def cancel_booking(booking_id: str, request: Optional[CancelBookingRequest
     # refund logic here. Revisit only if this ever becomes a much higher-
     # volume storefront where manual refund handling stops scaling.
 
-    # TODO (future, once SES is wired in): send TWO emails on successful
-    # cancellation — one to Debo confirming the cancellation happened, and
-    # one to the original booker (client) notifying them their session was
-    # cancelled. Both emails belong HERE, only on the "cancelled" outcome
-    # above, never on the "already_cancelled" rejection path. The `reason`
-    # captured above (typed by Debo, or DEFAULT_CANCELLATION_REASON if he
-    # didn't provide one) belongs in BOTH email bodies once that's wired in.
+    # Two emails on successful cancellation — one to Debo confirming it
+    # happened, one to the client notifying them. Only on the "cancelled"
+    # outcome above, never on the "already_cancelled" rejection path (that's
+    # a no-op, not a real state change). The `reason` captured earlier
+    # (typed by Debo, or DEFAULT_CANCELLATION_REASON if he didn't provide
+    # one) goes into both email bodies.
+    ses = get_ses_service()
+    ses.send_cancellation_notice_to_client(item, reason)
+    ses.send_cancellation_notice_to_admin(item, reason, admin_email=os.environ["ADMIN_EMAIL"])
+
     logger.info("Booking %s cancelled by admin (reason: %s)", booking_id, reason)
     return _item_to_response(item)

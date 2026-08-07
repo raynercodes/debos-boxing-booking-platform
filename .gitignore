@@ -17,3 +17,4 @@ setup_repo.sh
 *trust_policy.json
 *-iam-policy.json
 *-deploy-policy.json
+github_actions_trust_policy.json

@@ -42,29 +42,6 @@ jobs:
       - run: pip install aws-sam-cli
       - run: cp -r src ./package/
       - run: sam build --template infrastructure/template.yaml --no-cached
-      - name: DEBUG - fetch and decode the real OIDC token claims
-        run: |
-          curl -sSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com" \
-            -o token_response.json
-          python3 -c "
-          import json, base64
-          with open('token_response.json') as f:
-              token = json.load(f)['value']
-          payload_b64 = token.split('.')[1]
-          payload_b64 += '=' * (-len(payload_b64) % 4)
-          payload = json.loads(base64.urlsafe_b64decode(payload_b64))
-          print('sub:', payload.get('sub'))
-          print('aud:', payload.get('aud'))
-          print('repository:', payload.get('repository'))
-          print('ref:', payload.get('ref'))
-          "
-        # TEMPORARY — self-contained (curl + Python stdlib only, no Docker,
-        # no third-party action), so it can't break the way the previous
-        # debugger action just did. Prints the REAL sub/aud claims AWS
-        # actually receives, straight from GitHub's own token endpoint —
-        # compare this directly against the trust policy condition. Remove
-        # once the real mismatch is found and fixed.
       - name: Configure AWS credentials via OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:

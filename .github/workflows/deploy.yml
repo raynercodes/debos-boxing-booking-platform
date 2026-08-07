@@ -42,6 +42,17 @@ jobs:
       - run: pip install aws-sam-cli
       - run: cp -r src ./package/
       - run: sam build --template infrastructure/template.yaml --no-cached
+      - name: DEBUG - print actual OIDC token claims
+        uses: github/actions-oidc-debugger@main
+        with:
+          audience: sts.amazonaws.com
+        # TEMPORARY — this is GitHub's own official debugging action,
+        # built specifically for this exact "why won't my trust policy
+        # match" situation. It prints the REAL "sub" and "aud" claims the
+        # token actually contains, so we can compare that ground truth
+        # directly against what the IAM trust policy expects, instead of
+        # guessing at what might be mismatched. Remove this step once the
+        # real cause is found and fixed.
       - name: Configure AWS credentials via OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:

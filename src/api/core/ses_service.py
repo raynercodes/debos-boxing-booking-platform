@@ -51,11 +51,11 @@ class SesService:
             logger.error("Failed to send email to %s (%s): %s", to_address, subject, exc, exc_info=True)
 
     def send_booking_confirmation(self, booking: dict) -> None:
-        subject = "Your session with Debo's Boxing and Fitness is confirmed!"
+        subject = "Your session with DEBO'S BOXING AND FITNESS is confirmed!"
         body = (
             f"Hi {booking['name']},\n\n"
-            f"Your session is confirmed for {booking['session_date']} at {booking['session_time']}.\n\n"
-            f"See you then — please arrive on time and ready to train!\n\n"
+            f"Your booked session is confirmed for {booking['session_date']} at {booking['session_time']} with Debo.\n\n"
+            f"See you then — please arrive on time, geared up and ready to be great!\n\n"
             f"Debo's Boxing and Fitness"
         )
         self._send(booking["email"], subject, body)
@@ -69,37 +69,37 @@ class SesService:
             f"Email: {booking['email']}\n"
             f"Type: {booking['booking_type']}\n"
             f"Date: {booking['session_date']} at {booking['session_time']}\n"
-            f"Price: ${booking['price_usd']}\n"
+            f"Payment amount sent to you: ${booking['price_usd']}\n"
         )
         self._send(admin_email, subject, body)
 
     def send_cancellation_notice_to_client(self, booking: dict, reason: str) -> None:
-        subject = "Your session has been cancelled"
+        subject = "Your booked session at DEBO'S BOXING AND FITNESS has been cancelled"
         body = (
             f"Hi {booking['name']},\n\n"
-            f"Your session on {booking['session_date']} at {booking['session_time']} has been cancelled.\n\n"
-            f"Reason: {reason}\n\n"
-            f"Debo's Boxing and Fitness"
+            f"Sorry to inform you, but your session on {booking['session_date']} at {booking['session_time']} has been cancelled.\n\n"
+            f"Cancelation reason: {reason}\n\n"
+            f"DEBO'S BOXING AND FITNESS"
         )
         self._send(booking["email"], subject, body)
 
     def send_cancellation_notice_to_admin(self, booking: dict, reason: str, admin_email: str) -> None:
-        subject = f"Booking cancelled: {booking['name']} on {booking['session_date']}"
+        subject = f"Booking cancelled for {booking['name']} on {booking['session_date']}"
         body = (
             f"You cancelled the following booking:\n\n"
             f"Client: {booking['name']}\n"
             f"Date: {booking['session_date']} at {booking['session_time']}\n"
-            f"Reason given: {reason}\n"
+            f"Reason given to client: {reason}\n"
         )
         self._send(admin_email, subject, body)
 
     def send_reminder(self, booking: dict) -> None:
-        subject = "Reminder: your session with Debo's Boxing and Fitness is tomorrow"
+        subject = "Reminder: your booked training session with DEBO'S BOXING AND FITNESS is tomorrow"
         body = (
             f"Hi {booking['name']},\n\n"
             f"Just a reminder — your session is tomorrow, {booking['session_date']} at {booking['session_time']}.\n\n"
             f"See you then!\n\n"
-            f"Debo's Boxing and Fitness"
+            f"DEBO'S BOXING AND FITNESS"
         )
         self._send(booking["email"], subject, body)
 

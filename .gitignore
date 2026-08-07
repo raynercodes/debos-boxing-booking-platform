@@ -14,3 +14,6 @@ samconfig.toml
 *_update.sh
 setup_repo.sh
 *fix.sh
+*trust_policy.json
+*-iam-policy.json
+*-deploy-policy.json

@@ -12,7 +12,7 @@
           "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
         },
         "StringLike": {
-          "token.actions.githubusercontent.com:sub": "repo:raynercodes/debos-boxing-booking-platform:*"
+          "token.actions.githubusercontent.com:sub": "repo:raynercodes@259828353/debos-boxing-booking-platform@1322666933:*"
         }
       }
     }

@@ -393,6 +393,53 @@ def test_list_bookings_excludes_slot_claim_records(mock_aws_infra, admin_token, 
     assert not any(b["booking_id"].startswith("personal-slot#") for b in body)
 
 
+def test_list_bookings_excludes_expired(mock_aws_infra, admin_token, mock_stripe_checkout):
+    """An expired booking never became a real relationship at all — no
+    payment, nothing Debo needs to prepare for. Should never show up in
+    his day-to-day list, unlike a cancelled booking which stays visible
+    since it represents something that actually happened."""
+    from src.api.core.bookings_repository import BookingRepository
+    from src.api.core.database import get_db_service
+
+    created = client.post("/bookings", json=_booking_payload(BookingType.genes_kids))
+    booking_id = created.json()["booking_id"]
+
+    repo = BookingRepository(get_db_service())
+    repo.set_status(booking_id, "expired")
+
+    response = client.get("/bookings", headers={"Authorization": f"Bearer {admin_token}"})
+    body = response.json()
+    assert not any(b["booking_id"] == booking_id for b in body)
+
+
+def test_list_bookings_show_expired_returns_only_expired_leads(mock_aws_infra, admin_token, mock_stripe_checkout):
+    """The dedicated follow-up-leads view — show_expired=True should
+    return ONLY expired bookings, excluding confirmed/processing ones
+    entirely. This is the inverse guarantee of the default-view test
+    above: expired is invisible by default, but fully recoverable here."""
+    from src.api.core.bookings_repository import BookingRepository
+    from src.api.core.database import get_db_service
+
+    repo = BookingRepository(get_db_service())
+
+    expired = client.post("/bookings", json=_booking_payload(BookingType.genes_kids, name="Expired Lead"))
+    expired_id = expired.json()["booking_id"]
+    repo.set_status(expired_id, "expired")
+
+    confirmed = client.post("/bookings", json=_booking_payload(BookingType.genes_adult, name="Real Client"))
+    confirmed_id = confirmed.json()["booking_id"]
+    repo.set_status(confirmed_id, "confirmed")
+
+    response = client.get(
+        "/bookings", params={"show_expired": "true"},
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    body = response.json()
+
+    assert any(b["booking_id"] == expired_id for b in body)
+    assert not any(b["booking_id"] == confirmed_id for b in body)
+
+
 def test_list_bookings_search_filters_by_name(mock_aws_infra, admin_token, mock_stripe_checkout):
     client.post("/bookings", json=_booking_payload(BookingType.genes_adult, name="Alice Boxer"))
     client.post("/bookings", json=_booking_payload(BookingType.genes_adult, name="Bob Fighter"))

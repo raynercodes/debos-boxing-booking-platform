@@ -279,6 +279,11 @@ async def create_booking(
 async def list_bookings(
     day_of_week: Optional[str] = Query(None),
     search: Optional[str] = Query(None),
+    show_expired: bool = Query(False, description="Dedicated follow-up-leads view — when "
+                                "True, returns ONLY expired bookings instead of the normal "
+                                "list. These are real warm leads (name, email, phone all on "
+                                "file) who started booking but never paid — worth a follow-up "
+                                "call, just never mixed into the default day-to-day list."),
 ) -> List[BookingResponse]:
     if day_of_week and day_of_week.lower() not in VALID_DAYS:
         raise AppError(f"day_of_week must be one of {VALID_DAYS}")
@@ -304,9 +309,27 @@ async def list_bookings(
     # identifiable by their synthetic "personal-slot#..." booking_id prefix.
     all_items = [item for item in all_items if not item["booking_id"].startswith("personal-slot#")]
 
-    # History filter — computed fresh on every call, never trusted from a
-    # stored flag (see HISTORY_VISIBILITY_WINDOW comment above).
-    visible_items = [item for item in all_items if not _is_past_visibility_window(item)]
+    if show_expired:
+        # Dedicated leads view — the history-visibility filter deliberately
+        # does NOT apply here. That filter hides sessions whose start time
+        # has passed, which makes sense for REAL sessions (nothing to
+        # prepare for anymore) — but an expired booking's attempted time
+        # being in the past is irrelevant to a follow-up call; the whole
+        # point is convincing them to book a NEW session regardless of
+        # when their original attempt was.
+        visible_items = [item for item in all_items if item["status"] == "expired"]
+    else:
+        # History filter — computed fresh on every call, never trusted from a
+        # stored flag (see HISTORY_VISIBILITY_WINDOW comment above).
+        visible_items = [item for item in all_items if not _is_past_visibility_window(item)]
+
+        # Expired bookings excluded from the DEFAULT view — an abandoned
+        # checkout never became a real relationship on its own (no
+        # payment), and would just be noise in the day-to-day "who am I
+        # training" list. Still fully visible via show_expired=True above,
+        # as a genuine follow-up-leads opportunity, just never mixed in
+        # here by default.
+        visible_items = [item for item in visible_items if item["status"] != "expired"]
 
     # Search filter — case-insensitive substring match on name or phone.
     # Done in Python, not a DynamoDB filter expression — not worth a GSI

@@ -101,8 +101,9 @@ class SesService:
         subject = "Your booked session at DEBO'S BOXING AND FITNESS has been cancelled"
         body = (
             f"Hi {booking['name']},\n\n"
-            f"Sorry to inform you, but your session on {booking['session_date']} at {booking['session_time']} has been cancelled.\n\n"
+            f"Sorry to inform you, but your session on {booking['session_date']} at {booking['session_time']} has been cancelled by Debo.\n\n"
             f"Cancelation reason: {reason}\n\n"
+            f"If you have any questions or want to rebook, please reach out to Debo directly on his personal number or email at debosboxingandfitness@gmail.com.\n\n"
             f"DEBO'S BOXING AND FITNESS"
         )
         self._send(booking["email"], subject, body)

@@ -83,15 +83,27 @@ def mock_aws_infra(aws_test_env):
                 {"AttributeName": "booking_id", "AttributeType": "S"},
                 {"AttributeName": "session_date", "AttributeType": "S"},
                 {"AttributeName": "session_time", "AttributeType": "S"},
+                {"AttributeName": "client_ip", "AttributeType": "S"},
+                {"AttributeName": "status", "AttributeType": "S"},
             ],
-            GlobalSecondaryIndexes=[{
-                "IndexName": "session-date-index",
-                "KeySchema": [
-                    {"AttributeName": "session_date", "KeyType": "HASH"},
-                    {"AttributeName": "session_time", "KeyType": "RANGE"},
-                ],
-                "Projection": {"ProjectionType": "ALL"},
-            }],
+            GlobalSecondaryIndexes=[
+                {
+                    "IndexName": "session-date-index",
+                    "KeySchema": [
+                        {"AttributeName": "session_date", "KeyType": "HASH"},
+                        {"AttributeName": "session_time", "KeyType": "RANGE"},
+                    ],
+                    "Projection": {"ProjectionType": "ALL"},
+                },
+                {
+                    "IndexName": "client-ip-status-index",
+                    "KeySchema": [
+                        {"AttributeName": "client_ip", "KeyType": "HASH"},
+                        {"AttributeName": "status", "KeyType": "RANGE"},
+                    ],
+                    "Projection": {"ProjectionType": "ALL"},
+                },
+            ],
             BillingMode="PAY_PER_REQUEST",
         )
 

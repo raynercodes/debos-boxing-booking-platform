@@ -110,20 +110,19 @@ class BookingRepository:
             raise ExternalServiceError("Unable to update booking") from exc
 
     def find_processing_booking_by_ip(self, client_ip: str) -> Optional[dict]:
-        """Table scan, deliberately — not a GSI query. This table is small
-        (a single local gym, not high-volume traffic), so a scan with a
-        filter is genuinely fine at this scale and avoids adding schema/
-        infra complexity (a new GSI, a redeploy) for a check that doesn't
-        need to be fast yet. Worth revisiting as a proper GSI (partition
-        key client_ip, sort key status) once real traffic volume justifies
-        it — noted here so it isn't forgotten, not because it's wrong now.
+        """Real Query against the client-ip-status-index GSI — not a table
+        scan. This check runs on EVERY booking creation request, not an
+        occasional admin action, so it needed a proper index rather than
+        the scan-and-filter approach used elsewhere for genuinely rare
+        operations. Slot-claim records never appear here at all — they
+        have no client_ip attribute, so DynamoDB's GSI simply never
+        indexes them in the first place.
 
         Returns the first processing booking found for this IP, or None."""
         try:
-            response = self._db.bookings_table.scan(
-                FilterExpression="client_ip = :ip AND #s = :status",
-                ExpressionAttributeNames={"#s": "status"},
-                ExpressionAttributeValues={":ip": client_ip, ":status": "processing"},
+            response = self._db.bookings_table.query(
+                IndexName="client-ip-status-index",
+                KeyConditionExpression=Key("client_ip").eq(client_ip) & Key("status").eq("processing"),
                 Limit=1,
             )
             items = response.get("Items", [])

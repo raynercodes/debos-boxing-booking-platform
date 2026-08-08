@@ -50,6 +50,30 @@ class SesService:
             # Swallowed deliberately — see module docstring for why.
             logger.error("Failed to send email to %s (%s): %s", to_address, subject, exc, exc_info=True)
 
+    def send_checkout_link(self, booking: dict, checkout_url: str) -> None:
+        """Sent immediately when checkout STARTS, not when it confirms —
+        the recovery path for someone who gets redirected to Stripe, then
+        closes the tab, loses connection, or just gets distracted before
+        paying. Without this, that booking sits stuck in 'processing' for
+        the full 30-minute expiry with zero way back in, even though
+        Stripe's own session URL is still perfectly valid and reusable
+        the whole time. Re-sending them the exact same URL costs nothing
+        and creates no duplicate booking or charge risk — it's the same
+        checkout session, just given a second entry point."""
+        subject = "Complete your booking with DEBO'S BOXING AND FITNESS"
+        body = (
+            f"Hi {booking['name']},\n\n"
+            f"You started booking a session for {booking['session_date']} at {booking['session_time']}.\n\n"
+            f"If you were redirected to payment automatically, you can ignore this email. "
+            f"But if your browser closed, your connection dropped, or you just didn't finish — "
+            f"use this link to complete your payment:\n\n"
+            f"{checkout_url}\n\n"
+            f"This link is valid for 30 minutes from when you started booking. After that, "
+            f"you'll need to submit a new booking.\n\n"
+            f"DEBO'S BOXING AND FITNESS"
+        )
+        self._send(booking["email"], subject, body)
+
     def send_booking_confirmation(self, booking: dict) -> None:
         subject = "Your session with DEBO'S BOXING AND FITNESS is confirmed!"
         body = (

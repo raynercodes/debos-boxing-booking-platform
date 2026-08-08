@@ -214,6 +214,17 @@ async def create_booking(request: BookingRequest):
         "Checkout started: %s %s (%s, $%s) booking_id=%s",
         request.session_date, request.session_time, booking_type.value, price_usd, booking_id,
     )
+
+    # Recovery path — if they don't complete payment right now (closed
+    # tab, dropped connection, distracted), this is how they get back
+    # into the SAME checkout session without their booking sitting
+    # stranded for the full 30-minute expiry with no way back in.
+    get_ses_service().send_checkout_link(
+        {"name": request.name, "email": request.email,
+         "session_date": request.session_date, "session_time": request.session_time},
+        checkout_url=session.url,
+    )
+
     return BookingCheckoutResponse(
         booking_id=booking_id,
         status=BookingStatus.processing,

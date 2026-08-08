@@ -96,6 +96,26 @@ def test_create_booking_starts_checkout_not_confirmed(mock_aws_infra, mock_strip
     assert body["checkout_url"] == "https://checkout.stripe.com/test-session-url"
 
 
+def test_create_booking_sends_checkout_link_email(mock_aws_infra, mock_stripe_checkout):
+    """The recovery-path email — sent the moment checkout STARTS, not on
+    confirmation, so someone who closes the tab before paying isn't
+    stranded with a stuck booking and no way back into the same session."""
+    from unittest.mock import MagicMock
+    import src.api.core.ses_service as ses_module
+
+    mock_client = MagicMock()
+    ses_module.get_ses_service()._client = mock_client
+
+    response = client.post("/bookings", json=_booking_payload(BookingType.genes_kids))
+    assert response.status_code == 201
+
+    mock_client.send_email.assert_called_once()
+    kwargs = mock_client.send_email.call_args.kwargs
+    assert kwargs["Destination"]["ToAddresses"] == [_booking_payload(BookingType.genes_kids)["email"]]
+    assert "https://checkout.stripe.com/test-session-url" in kwargs["Message"]["Body"]["Text"]["Data"]
+    assert "30 minutes" in kwargs["Message"]["Body"]["Text"]["Data"]
+
+
 def test_create_booking_invalid_location_detail_combo(mock_aws_infra):
     """genes + client_travels isn't a real offering — rejected at the API
     boundary (422), never even reaching Stripe."""

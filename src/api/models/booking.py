@@ -124,6 +124,20 @@ KIDS_AGE_RANGE = "6-13"  # confirmed — used for the UI label, e.g. "Kids (ages
 # not an arbitrary smaller number.
 CHECKOUT_SESSION_EXPIRY_MINUTES = 30
 
+# Single source of truth for which times are offered per booking type.
+# The frontend fetches this list rather than hardcoding times itself —
+# changing gym hours means editing THIS dict and redeploying, nothing
+# on the Framer side ever needs to change. PLACEHOLDER VALUES — confirm
+# real hours per offering with Debo before this goes live for real
+# clients; these are reasonable guesses, not confirmed business hours.
+AVAILABLE_TIMES_BY_TYPE: dict[str, list[str]] = {
+    "personal_client_travels": ["09:00", "11:00", "13:00", "15:00", "17:00"],
+    "personal_trainer_travels": ["09:00", "11:00", "13:00", "15:00", "17:00"],
+    "personal_virtual": ["09:00", "11:00", "13:00", "15:00", "17:00", "19:00"],
+    "genes_adult": ["17:00", "19:00"],
+    "genes_kids": ["16:00", "17:00"],
+}
+
 
 class BookingRequest(BaseModel):
     # Pre-fills Swagger UI's "Try it out" form at /docs with a realistic

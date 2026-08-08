@@ -4,7 +4,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from src.api.main import app
-from src.api.models.booking import BOOKING_TYPE_RULES, BookingType
+from src.api.models.booking import BOOKING_TYPE_RULES, BookingType, AVAILABLE_TIMES_BY_TYPE
 
 client = TestClient(app)
 
@@ -445,3 +445,33 @@ def test_list_bookings_invalid_day_of_week_rejected(mock_aws_infra, admin_token)
         headers={"Authorization": f"Bearer {admin_token}"},
     )
     assert response.status_code == 400
+
+
+def test_available_times_endpoint_is_public_and_returns_full_mapping(mock_aws_infra):
+    # No Authorization header - this must be public, same as booking
+    # creation itself, since a prospective client filling out the form
+    # hasn't authenticated at all.
+    response = client.get("/bookings/available-times")
+    assert response.status_code == 200
+    data = response.json()
+    assert data == AVAILABLE_TIMES_BY_TYPE
+
+
+def test_available_times_covers_every_booking_type():
+    # Every real booking type must have at least one offered time, or the
+    # frontend dropdown would render empty for that option.
+    for booking_type in BookingType:
+        assert booking_type.value in AVAILABLE_TIMES_BY_TYPE
+        assert len(AVAILABLE_TIMES_BY_TYPE[booking_type.value]) > 0
+
+
+def test_available_times_does_not_shadow_get_booking_by_id(mock_aws_infra):
+    # Route-ordering regression guard: "/available-times" must never be
+    # matched as if "available-times" were a booking_id path parameter.
+    response = client.get("/bookings/available-times")
+    assert response.status_code == 200
+    assert isinstance(response.json(), dict)
+    # A real booking_id lookup for a nonexistent id should still 404
+    # correctly and separately, proving both routes coexist correctly.
+    not_found = client.get("/bookings/definitely-not-a-real-id")
+    assert not_found.status_code == 404

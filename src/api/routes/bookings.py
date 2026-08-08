@@ -8,7 +8,8 @@ from pydantic import BaseModel
 
 from src.api.models.booking import (
     BookingRequest, BookingResponse, BookingCheckoutResponse, BookingStatus,
-    BOOKING_TYPE_RULES, CHECKOUT_SESSION_EXPIRY_MINUTES, requires_slot_claim,
+    BOOKING_TYPE_RULES, CHECKOUT_SESSION_EXPIRY_MINUTES, AVAILABLE_TIMES_BY_TYPE,
+    requires_slot_claim,
 )
 from src.api.core.security import get_security_service
 from src.api.core.database import get_db_service
@@ -23,6 +24,21 @@ from src.api.core.logging_config import get_logger
 
 logger = get_logger(__name__)
 router = APIRouter()
+
+
+@router.get(
+    "/available-times",
+    summary="Get Available Times By Booking Type",
+    description="Returns the full mapping of booking type to its offered "
+                "times. Public, no auth — the frontend fetches this once "
+                "and looks up times locally as the person changes their "
+                "selected booking type, rather than a real-time-conflict-"
+                "aware slot picker. Changing gym hours means editing "
+                "AVAILABLE_TIMES_BY_TYPE in the backend and redeploying — "
+                "nothing on the frontend ever needs to change.",
+)
+async def get_available_times():
+    return AVAILABLE_TIMES_BY_TYPE
 bearer_scheme = HTTPBearer()
 
 # Weekends deliberately excluded — no BookingType's allowed_weekdays ever

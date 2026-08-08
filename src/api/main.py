@@ -1,5 +1,6 @@
 import os
 from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from mangum import Mangum
 
@@ -42,6 +43,28 @@ app = FastAPI(
     # a path either matches exactly or returns a clean 404 — no silent
     # redirect that could make a real booking/lead/webhook call quietly fail.
     redirect_slashes=False,
+)
+
+# CORS — required because Framer's site runs on a completely different
+# domain than this API. Without this, the browser blocks the booking
+# form's request entirely before it ever reaches us — invisible via curl
+# or /docs, since neither is subject to browser CORS enforcement, only
+# real cross-origin requests from an actual browser are.
+#
+# allow_origins="*" is deliberately broad for now — dev environment,
+# Framer's preview URL isn't final yet, and none of our public endpoints
+# (bookings, leads) rely on cookies (admin auth uses an explicit Bearer
+# token, not a browser-managed cookie), so allow_credentials=False is
+# both correct and required — the CORS spec forbids combining a wildcard
+# origin with credentials=True. TIGHTEN THIS before staging/prod: once
+# the real custom domain exists, replace "*" with an explicit allowlist
+# of exactly debosboxingandfitness.com and www.debosboxingandfitness.com.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 

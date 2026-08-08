@@ -42,41 +42,18 @@ jobs:
       - run: pip install aws-sam-cli
       - name: Prepare package directory
         # Explicit rm+mkdir first - never assumes what state package/
-        # starts in on a fresh CI runner, unlike locally where the same
-        # cp command has run repeatedly across many iterations on an
-        # already-established directory. This removes that assumption
-        # entirely rather than hoping it behaves the same way every time.
+        # starts in on a fresh CI runner. Copies BOTH src and
+        # requirements.txt - local builds always copied both, but this
+        # workflow only copied src, which is why CI's build had no
+        # dependencies (fastapi, mangum, etc.) to install at all while
+        # local builds worked fine.
         run: |
           rm -rf package
           mkdir package
           cp -r src ./package/
+          cp requirements.txt ./package/
           ls -la package/
-          echo "--- package/src contents ---"
-          ls -la package/src/ || echo "src NOT FOUND inside package/ - this is the bug"
       - run: sam build --template infrastructure/template.yaml --no-cached
-      - name: DEBUG - fetch and decode the real OIDC token claims
-        run: |
-          curl -sSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com" \
-            -o token_response.json
-          python3 -c "
-          import json, base64
-          with open('token_response.json') as f:
-              token = json.load(f)['value']
-          payload_b64 = token.split('.')[1]
-          payload_b64 += '=' * (-len(payload_b64) % 4)
-          payload = json.loads(base64.urlsafe_b64decode(payload_b64))
-          print('sub:', payload.get('sub'))
-          print('aud:', payload.get('aud'))
-          print('repository:', payload.get('repository'))
-          print('ref:', payload.get('ref'))
-          "
-        # TEMPORARY — self-contained (curl + Python stdlib only, no Docker,
-        # no third-party action), so it can't break the way the previous
-        # debugger action just did. Prints the REAL sub/aud claims AWS
-        # actually receives, straight from GitHub's own token endpoint —
-        # compare this directly against the trust policy condition. Remove
-        # once the real mismatch is found and fixed.
       - name: Configure AWS credentials via OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:

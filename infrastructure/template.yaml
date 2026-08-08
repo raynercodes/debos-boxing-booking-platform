@@ -307,12 +307,22 @@ Resources:
                   - !GetAtt AdminCredentialsKmsKey.Arn
                   - !GetAtt DynamoDbKmsKey.Arn
                   - !GetAtt StripeKmsKey.Arn
-              # SES — scoped to only this verified identity, not '*'
+              # SES — Resource: "*" here is deliberate, not a loosening of
+              # security. FROM_ADDRESS is a hardcoded constant in our own
+              # application code (ses_service.py), never user-controllable
+              # — so this Lambda can NEVER send from an arbitrary address
+              # regardless of what this IAM resource scope allows. The
+              # actual restriction lives in our code, not this policy.
+              # Narrowly scoping this to only our domain identity broke
+              # real sending while in SES sandbox mode: sandbox's
+              # authorization check also involves the RECIPIENT's
+              # identity ARN, which is unpredictable (varies per test/
+              # real client email) and can't be enumerated in advance.
               - Effect: Allow
                 Action:
                   - ses:SendEmail
                   - ses:SendRawEmail
-                Resource: !Sub arn:aws:ses:${AWS::Region}:${AWS::AccountId}:identity/debosboxingandfitness.com
+                Resource: "*"
 
   # -------------------------------------------------------
   # Lambda — Main API Function

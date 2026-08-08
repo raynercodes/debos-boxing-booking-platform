@@ -114,9 +114,17 @@ class BookingRepository:
         scan. This check runs on EVERY booking creation request, not an
         occasional admin action, so it needed a proper index rather than
         the scan-and-filter approach used elsewhere for genuinely rare
-        operations. Slot-claim records never appear here at all — they
-        have no client_ip attribute, so DynamoDB's GSI simply never
-        indexes them in the first place.
+        operations.
+
+        Slot-claim records share this same base table but can NEVER match
+        here — not because they're filtered out, but because DynamoDB
+        GSIs are sparse: an item only gets indexed if it has BOTH of the
+        GSI's key attributes. Slot-claim records DO have a status field
+        (matching half the key schema), but they never have a client_ip
+        attribute at all (that field is only ever set on real customer
+        booking records) — so DynamoDB never projects them into this
+        index in the first place. A Query here can only ever return real
+        customer bookings.
 
         Returns the first processing booking found for this IP, or None."""
         try:

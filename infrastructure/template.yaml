@@ -502,6 +502,10 @@ Resources:
           AttributeType: S
         - AttributeName: session_time
           AttributeType: S
+        - AttributeName: client_ip
+          AttributeType: S
+        - AttributeName: status
+          AttributeType: S
       KeySchema:
         - AttributeName: booking_id
           KeyType: HASH
@@ -511,6 +515,21 @@ Resources:
             - AttributeName: session_date
               KeyType: HASH
             - AttributeName: session_time
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: client-ip-status-index
+          # Powers the one-processing-booking-per-IP check on every
+          # booking creation request — a real Query here instead of a
+          # table scan, since this runs on every single booking attempt,
+          # not an occasional admin action. Slot-claim records naturally
+          # never appear in this index at all — they don't have a
+          # client_ip attribute, and DynamoDB GSIs only index items that
+          # actually have the key attribute present.
+          KeySchema:
+            - AttributeName: client_ip
+              KeyType: HASH
+            - AttributeName: status
               KeyType: RANGE
           Projection:
             ProjectionType: ALL

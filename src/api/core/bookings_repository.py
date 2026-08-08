@@ -139,6 +139,29 @@ class BookingRepository:
             logger.error("Failed to check processing bookings for IP %s: %s", client_ip, exc, exc_info=True)
             raise ExternalServiceError("Unable to check existing bookings") from exc
 
+    def scan_expired_since(self, since_iso_date: str) -> List[dict]:
+        """Scan, deliberately — not the session-date-index GSI. This
+        filters by created_at (when someone actually attempted a booking),
+        not session_date (what date they were trying to book FOR) — those
+        differ meaningfully: someone who abandoned checkout today could
+        have been trying to book a session next week, so session_date can
+        land in the future relative to today, making the date-indexed GSI
+        the wrong tool for "recent leads" specifically. A scan is
+        acceptable here because this endpoint is low-frequency — an
+        occasional button click, not run on every booking request the way
+        the IP-check GSI needed to be — matching the same reasoning
+        already applied to the Leads table elsewhere in this project."""
+        try:
+            response = self._db.bookings_table.scan(
+                FilterExpression="#s = :status AND created_at >= :since",
+                ExpressionAttributeNames={"#s": "status"},
+                ExpressionAttributeValues={":status": "expired", ":since": since_iso_date},
+            )
+            return response.get("Items", [])
+        except (ClientError, BotoCoreError) as exc:
+            logger.error("Failed to scan expired bookings since %s: %s", since_iso_date, exc, exc_info=True)
+            raise ExternalServiceError("Unable to check expired bookings") from exc
+
     def query_by_date(self, session_date: str) -> List[dict]:
         """One Query per exact date against the session-date-index GSI.
         Deliberately NOT a Scan — the admin week-view endpoint calls this

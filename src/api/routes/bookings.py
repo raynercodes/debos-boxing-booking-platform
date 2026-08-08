@@ -283,26 +283,43 @@ async def list_bookings(
                                 "True, returns ONLY expired bookings instead of the normal "
                                 "list. These are real warm leads (name, email, phone all on "
                                 "file) who started booking but never paid — worth a follow-up "
-                                "call, just never mixed into the default day-to-day list."),
+                                "call, just never mixed into the default day-to-day list. "
+                                "Scoped to the current + previous calendar month — broad "
+                                "enough to be a useful catalog without becoming an "
+                                "ever-growing pile of stale leads."),
 ) -> List[BookingResponse]:
     if day_of_week and day_of_week.lower() not in VALID_DAYS:
         raise AppError(f"day_of_week must be one of {VALID_DAYS}")
 
     repo = _get_repository()
     today = datetime.now(timezone.utc).date()
-    week_dates = [today + timedelta(days=i) for i in range(7)]
 
-    # If a specific day_of_week was given, only query the ONE date in the
-    # current week window that falls on that weekday — no reason to issue
-    # 7 GSI queries and throw away 6 of them when we can compute which
-    # single date we actually need.
-    if day_of_week:
-        target_weekday = VALID_DAYS.index(day_of_week.lower())
-        week_dates = [d for d in week_dates if d.weekday() == target_weekday]
+    if show_expired:
+        # Current + previous calendar month, anchored to today, filtering
+        # on created_at (when the attempt happened) via a scan — see
+        # scan_expired_since()'s docstring for why the date-indexed GSI
+        # approach used below for the normal view doesn't work here.
+        first_of_this_month = today.replace(day=1)
+        if first_of_this_month.month == 1:
+            range_start = first_of_this_month.replace(year=first_of_this_month.year - 1, month=12)
+        else:
+            range_start = first_of_this_month.replace(month=first_of_this_month.month - 1)
 
-    all_items: List[dict] = []
-    for date in week_dates:
-        all_items.extend(repo.query_by_date(date.isoformat()))
+        all_items = repo.scan_expired_since(range_start.isoformat())
+    else:
+        query_dates = [today + timedelta(days=i) for i in range(7)]
+
+        # If a specific day_of_week was given, only query the ONE date in
+        # the current week window that falls on that weekday — no reason
+        # to issue 7 GSI queries and throw away 6 of them when we can
+        # compute which single date we actually need.
+        if day_of_week:
+            target_weekday = VALID_DAYS.index(day_of_week.lower())
+            query_dates = [d for d in query_dates if d.weekday() == target_weekday]
+
+        all_items = []
+        for date in query_dates:
+            all_items.extend(repo.query_by_date(date.isoformat()))
 
     # Slot-claim records share the bookings table but aren't real bookings —
     # filter them out before anything else touches this list. They're
@@ -310,14 +327,9 @@ async def list_bookings(
     all_items = [item for item in all_items if not item["booking_id"].startswith("personal-slot#")]
 
     if show_expired:
-        # Dedicated leads view — the history-visibility filter deliberately
-        # does NOT apply here. That filter hides sessions whose start time
-        # has passed, which makes sense for REAL sessions (nothing to
-        # prepare for anymore) — but an expired booking's attempted time
-        # being in the past is irrelevant to a follow-up call; the whole
-        # point is convincing them to book a NEW session regardless of
-        # when their original attempt was.
-        visible_items = [item for item in all_items if item["status"] == "expired"]
+        # No further status filtering needed — scan_expired_since()
+        # already returns only status="expired" items directly.
+        visible_items = all_items
     else:
         # History filter — computed fresh on every call, never trusted from a
         # stored flag (see HISTORY_VISIBILITY_WINDOW comment above).

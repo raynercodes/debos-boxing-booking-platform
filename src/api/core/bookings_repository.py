@@ -93,6 +93,45 @@ class BookingRepository:
             logger.error("Failed to mark reminder sent for booking %s: %s", booking_id, exc, exc_info=True)
             raise ExternalServiceError("Unable to update reminder status") from exc
 
+    def set_stripe_session_id(self, booking_id: str, stripe_session_id: str) -> None:
+        """Stored so /cancel-checkout can look up and force-expire the
+        exact Stripe session when someone explicitly cancels — the
+        session doesn't exist yet at the moment the booking item is
+        first created, so this is a separate update right after Stripe
+        actually returns it."""
+        try:
+            self._db.bookings_table.update_item(
+                Key={"booking_id": booking_id},
+                UpdateExpression="SET stripe_session_id = :sid",
+                ExpressionAttributeValues={":sid": stripe_session_id},
+            )
+        except (ClientError, BotoCoreError) as exc:
+            logger.error("Failed to store stripe_session_id for booking %s: %s", booking_id, exc, exc_info=True)
+            raise ExternalServiceError("Unable to update booking") from exc
+
+    def find_processing_booking_by_ip(self, client_ip: str) -> Optional[dict]:
+        """Table scan, deliberately — not a GSI query. This table is small
+        (a single local gym, not high-volume traffic), so a scan with a
+        filter is genuinely fine at this scale and avoids adding schema/
+        infra complexity (a new GSI, a redeploy) for a check that doesn't
+        need to be fast yet. Worth revisiting as a proper GSI (partition
+        key client_ip, sort key status) once real traffic volume justifies
+        it — noted here so it isn't forgotten, not because it's wrong now.
+
+        Returns the first processing booking found for this IP, or None."""
+        try:
+            response = self._db.bookings_table.scan(
+                FilterExpression="client_ip = :ip AND #s = :status",
+                ExpressionAttributeNames={"#s": "status"},
+                ExpressionAttributeValues={":ip": client_ip, ":status": "processing"},
+                Limit=1,
+            )
+            items = response.get("Items", [])
+            return items[0] if items else None
+        except (ClientError, BotoCoreError) as exc:
+            logger.error("Failed to check processing bookings for IP %s: %s", client_ip, exc, exc_info=True)
+            raise ExternalServiceError("Unable to check existing bookings") from exc
+
     def query_by_date(self, session_date: str) -> List[dict]:
         """One Query per exact date against the session-date-index GSI.
         Deliberately NOT a Scan — the admin week-view endpoint calls this

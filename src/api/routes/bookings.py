@@ -2,7 +2,8 @@ import os
 import uuid
 from datetime import datetime, timezone, timedelta
 from typing import Optional, List
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
+from fastapi.responses import HTMLResponse
 from fastapi.security import HTTPBearer
 from pydantic import BaseModel
 
@@ -18,12 +19,21 @@ from src.api.core.stripe_service import get_stripe_service
 from src.api.core.ses_service import get_ses_service
 from src.api.core.exceptions import (
     AppError, BookingNotFoundError, BookingAlreadyCancelledError,
-    SlotProcessingError, SlotTakenError,
+    SlotProcessingError, SlotTakenError, TooManyProcessingBookingsError,
 )
 from src.api.core.logging_config import get_logger
 
 logger = get_logger(__name__)
 router = APIRouter()
+
+
+def get_client_ip(http_request: Request) -> str:
+    """Extracted as its own dependency, not inlined — lets tests override
+    the simulated IP per-test via app.dependency_overrides, which is the
+    clean, idiomatic way to simulate different clients in FastAPI tests
+    (TestClient itself doesn't support faking different client IPs
+    directly)."""
+    return http_request.client.host if http_request.client else "unknown"
 
 
 @router.get(
@@ -128,7 +138,25 @@ def _is_past_visibility_window(item: dict) -> bool:
     description="Submit a new session booking. Returns a Stripe checkout URL — "
                 "the booking is NOT confirmed until payment succeeds via webhook.",
 )
-async def create_booking(request: BookingRequest):
+async def create_booking(
+    request: BookingRequest,
+    http_request: Request,
+    client_ip: str = Depends(get_client_ip),
+):
+    # One IP can only have ONE booking sitting in "processing" at a time —
+    # checked FIRST, before touching slot-claims or anything else, so this
+    # fails fast without any DynamoDB writes if it's going to fail at all.
+    # Known, accepted tradeoff: people sharing a network (family wifi,
+    # office) could share an IP and trip this even as different customers
+    # — the error message gives them a clear path forward regardless.
+    repo = _get_repository()
+    existing = repo.find_processing_booking_by_ip(client_ip)
+    if existing is not None:
+        raise TooManyProcessingBookingsError(
+            "You currently have a booking in progress. Check your email to finish "
+            "that booking before starting another one."
+        )
+
     # Price is ALWAYS looked up server-side from BOOKING_TYPE_RULES, never
     # accepted as a value from the client. If the client could send its own
     # price, anyone could book a $100 Gene's adult session and submit
@@ -137,7 +165,6 @@ async def create_booking(request: BookingRequest):
     # WHAT IT COSTS.
     booking_type = request.booking_type
     price_usd = BOOKING_TYPE_RULES[booking_type]["price_usd"]
-    repo = _get_repository()
     booking_id = str(uuid.uuid4())
 
     # Slot claiming ONLY applies to Personal training (any of the 3
@@ -174,6 +201,7 @@ async def create_booking(request: BookingRequest):
         "status": BookingStatus.processing.value,  # NEVER confirmed here — only the webhook confirms
         "created_at": datetime.now(timezone.utc).isoformat(),
         "reminder_sent": False,
+        "client_ip": client_ip,
     }
 
     try:
@@ -187,9 +215,12 @@ async def create_booking(request: BookingRequest):
         raise
 
     # Framer URLs are placeholders until the frontend exists — TODO once
-    # Framer is wired in, point these at the real confirmation/cancelled
-    # pages instead of this API's own domain.
+    # Framer is wired in, point success_url at the real confirmation page.
+    # cancel_url deliberately points at OUR OWN backend, not Framer — this
+    # endpoint works right now without needing any frontend page to exist,
+    # and can be swapped to a nicer Framer page later once that's built.
     base_url = os.environ.get("FRONTEND_BASE_URL", "https://debosboxingandfitness.com")
+    api_base_url = str(http_request.base_url).rstrip("/")
     stripe_service = get_stripe_service()
     try:
         session = stripe_service.create_checkout_session(
@@ -200,7 +231,7 @@ async def create_booking(request: BookingRequest):
             session_time=request.session_time,
             customer_email=request.email,
             success_url=f"{base_url}/booking-confirmed?booking_id={booking_id}",
-            cancel_url=f"{base_url}/booking-cancelled?booking_id={booking_id}",
+            cancel_url=f"{api_base_url}/bookings/{booking_id}/cancel-checkout",
             expires_in_minutes=CHECKOUT_SESSION_EXPIRY_MINUTES,
         )
     except Exception:
@@ -209,6 +240,11 @@ async def create_booking(request: BookingRequest):
         if requires_slot_claim(booking_type):
             repo.release_slot(request.session_date, request.session_time)
         raise
+
+    # Stored so /cancel-checkout can look up and force-expire THIS exact
+    # session when someone explicitly cancels, rather than making them
+    # wait out the full 30-minute natural expiry.
+    repo.set_stripe_session_id(booking_id, session.id)
 
     logger.info(
         "Checkout started: %s %s (%s, $%s) booking_id=%s",
@@ -300,6 +336,48 @@ async def get_booking(booking_id: str):
     if item is None:
         raise BookingNotFoundError(f"Booking {booking_id} not found")
     return _item_to_response(item)
+
+
+@router.get(
+    "/{booking_id}/cancel-checkout",
+    summary="Cancel In-Progress Checkout",
+    description="This is where Stripe's own cancel/back link redirects the "
+                "browser when someone changes their mind mid-checkout. "
+                "Public, no auth — a person canceling their OWN in-progress "
+                "checkout shouldn't need to be logged in. Force-expires the "
+                "Stripe session immediately (same real webhook path as "
+                "natural 30-minute expiry) rather than leaving the slot "
+                "claim reserved for no reason once we already know they're "
+                "not paying. Returns plain HTML directly since this is a "
+                "browser redirect target, not a JSON API call from code — "
+                "no Framer page needs to exist yet for this to work.",
+)
+async def cancel_checkout(booking_id: str):
+    repo = _get_repository()
+    item = repo.get_by_id(booking_id)
+
+    if item is None:
+        return HTMLResponse("<h1>Booking not found</h1>", status_code=404)
+
+    if item["status"] != BookingStatus.processing.value:
+        # Idempotent-safe — someone reloading this page, or clicking an
+        # old link after the booking already resolved one way or another,
+        # shouldn't see a confusing error.
+        return HTMLResponse(
+            "<h1>This booking has already been resolved.</h1>"
+            "<p>No further action needed.</p>"
+        )
+
+    session_id = item.get("stripe_session_id")
+    if session_id:
+        get_stripe_service().expire_checkout_session(session_id)
+
+    logger.info("Checkout explicitly cancelled by customer for booking %s", booking_id)
+
+    return HTMLResponse(
+        "<h1>Booking cancelled</h1>"
+        "<p>No charge was made. Feel free to book another session anytime.</p>"
+    )
 
 
 @router.patch(

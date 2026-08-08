@@ -4,6 +4,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from src.api.main import app
+from src.api.routes.bookings import get_client_ip
 from src.api.models.booking import BOOKING_TYPE_RULES, BookingType, AVAILABLE_TIMES_BY_TYPE
 
 client = TestClient(app)
@@ -116,6 +117,84 @@ def test_create_booking_sends_checkout_link_email(mock_aws_infra, mock_stripe_ch
     assert "30 minutes" in kwargs["Message"]["Body"]["Text"]["Data"]
 
 
+def test_second_booking_same_ip_blocked_while_first_processing(mock_aws_infra, mock_stripe_checkout):
+    """The one-booking-in-progress-per-IP guard — different booking types,
+    different dates even, same simulated client. Second must be blocked
+    regardless of what's actually being booked, since this check fires
+    before any type/slot-specific logic runs at all."""
+    app.dependency_overrides[get_client_ip] = lambda: "203.0.113.5"
+
+    first_payload = _booking_payload(BookingType.genes_kids)
+    first = client.post("/bookings", json=first_payload)
+    assert first.status_code == 201
+
+    second_payload = _booking_payload(BookingType.personal_virtual)
+    second = client.post("/bookings", json=second_payload)
+    app.dependency_overrides.clear()
+
+    assert second.status_code == 409
+    assert "booking in progress" in second.json()["detail"].lower()
+
+
+def test_different_ips_not_blocked_by_each_other(mock_aws_infra, mock_stripe_checkout):
+    """Confirms the IP check is genuinely scoped per-IP, not accidentally
+    global — two different simulated clients booking simultaneously must
+    both succeed."""
+    app.dependency_overrides[get_client_ip] = lambda: "203.0.113.10"
+    first = client.post("/bookings", json=_booking_payload(BookingType.genes_kids))
+
+    app.dependency_overrides[get_client_ip] = lambda: "203.0.113.20"
+    second = client.post("/bookings", json=_booking_payload(BookingType.personal_virtual))
+    app.dependency_overrides.clear()
+
+    assert first.status_code == 201
+    assert second.status_code == 201
+
+
+def test_cancel_checkout_expires_session_and_returns_html(mock_aws_infra, mock_stripe_checkout):
+    """The recovery path for Stripe's own cancel/back link — force-expires
+    the real Stripe session rather than leaving the booking stranded for
+    the full 30-minute natural expiry."""
+    from unittest.mock import patch
+
+    app.dependency_overrides[get_client_ip] = lambda: "203.0.113.30"
+    created = client.post("/bookings", json=_booking_payload(BookingType.genes_kids))
+    app.dependency_overrides.clear()
+    booking_id = created.json()["booking_id"]
+
+    with patch("stripe.checkout.Session.expire") as mock_expire:
+        response = client.get(f"/bookings/{booking_id}/cancel-checkout")
+
+    assert response.status_code == 200
+    assert "cancelled" in response.text.lower()
+    mock_expire.assert_called_once()
+
+
+def test_cancel_checkout_is_idempotent_for_already_resolved_booking(mock_aws_infra, mock_stripe_checkout):
+    """Reloading the cancel page, or clicking an old link after the
+    booking already resolved (confirmed, expired, or already cancelled),
+    should show a clean message — never a confusing error."""
+    from src.api.core.bookings_repository import BookingRepository
+    from src.api.core.database import get_db_service
+
+    app.dependency_overrides[get_client_ip] = lambda: "203.0.113.40"
+    created = client.post("/bookings", json=_booking_payload(BookingType.genes_kids))
+    app.dependency_overrides.clear()
+    booking_id = created.json()["booking_id"]
+
+    repo = BookingRepository(get_db_service())
+    repo.set_status(booking_id, "confirmed")
+
+    response = client.get(f"/bookings/{booking_id}/cancel-checkout")
+    assert response.status_code == 200
+    assert "already been resolved" in response.text.lower()
+
+
+def test_cancel_checkout_unknown_booking_returns_404(mock_aws_infra):
+    response = client.get("/bookings/not-a-real-id/cancel-checkout")
+    assert response.status_code == 404
+
+
 def test_create_booking_invalid_location_detail_combo(mock_aws_infra):
     """genes + client_travels isn't a real offering — rejected at the API
     boundary (422), never even reaching Stripe."""
@@ -178,10 +257,18 @@ def test_personal_slot_claimed_by_first_request_blocks_second(mock_aws_infra, mo
     currently being processed."""
     payload = _booking_payload(BookingType.personal_trainer_travels)
 
+    # Different simulated IPs — this test is specifically about SLOT-CLAIM
+    # behavior (same date+time), not the IP-based one-booking-at-a-time
+    # check, which would otherwise mask the thing actually being tested
+    # here since both requests would appear to come from the same client.
+    app.dependency_overrides[get_client_ip] = lambda: "10.0.0.1"
     first = client.post("/bookings", json=payload)
     assert first.status_code == 201
 
+    app.dependency_overrides[get_client_ip] = lambda: "10.0.0.2"
     second = client.post("/bookings", json=payload)
+    app.dependency_overrides.clear()
+
     assert second.status_code == 409
     assert "check back shortly" in second.json()["detail"].lower()
 
@@ -224,8 +311,16 @@ def test_genes_bookings_never_slot_claimed_multiple_allowed(mock_aws_infra, mock
     Gene's adult class time should both succeed."""
     payload = _booking_payload(BookingType.genes_adult)
 
+    # Different simulated IPs — genuinely different clients, matching the
+    # test's own premise ("two different clients"). Without this, the
+    # test would trip the unrelated one-booking-per-IP check instead of
+    # exercising what it's actually meant to test.
+    app.dependency_overrides[get_client_ip] = lambda: "10.0.0.3"
     first = client.post("/bookings", json=payload)
+
+    app.dependency_overrides[get_client_ip] = lambda: "10.0.0.4"
     second = client.post("/bookings", json={**payload, "name": "Second Client", "email": "second@example.com"})
+    app.dependency_overrides.clear()
 
     assert first.status_code == 201
     assert second.status_code == 201  # NOT blocked — group class, multiple bookings allowed

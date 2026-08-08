@@ -15,6 +15,7 @@ from src.api.core.exceptions import (
     BookingAlreadyCancelledError,
     SlotProcessingError,
     SlotTakenError,
+    TooManyProcessingBookingsError,
     WebhookSignatureError,
 )
 from src.api.core.logging_config import get_logger
@@ -149,6 +150,11 @@ async def slot_processing_handler(request: Request, exc: SlotProcessingError):
 
 @app.exception_handler(SlotTakenError)
 async def slot_taken_handler(request: Request, exc: SlotTakenError):
+    return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+
+@app.exception_handler(TooManyProcessingBookingsError)
+async def too_many_processing_handler(request: Request, exc: TooManyProcessingBookingsError):
     return JSONResponse(status_code=409, content={"detail": str(exc)})
 
 

@@ -141,6 +141,28 @@ class StripeService:
         the route decides the HTTP response."""
         return stripe.Webhook.construct_event(payload, signature_header, self.webhook_secret)
 
+    def expire_checkout_session(self, session_id: str) -> None:
+        """Forces an in-progress checkout session to expire immediately,
+        rather than waiting out the full 30-minute natural expiry. Used
+        when someone EXPLICITLY cancels (clicks Stripe's own cancel link)
+        — we already know they're not paying, so there's no reason to
+        keep their slot claim reserved for 30 more minutes on the off
+        chance they change their mind again. This triggers the SAME real
+        checkout.session.expired webhook as natural expiration does,
+        reusing all existing release-the-slot logic rather than
+        duplicating it.
+
+        Deliberately swallows StripeError — if the session already
+        completed, already expired naturally, or the ID is stale, that's
+        not a real problem worth failing the cancel-page request over;
+        the booking is either already resolved or will resolve itself
+        shortly regardless."""
+        stripe.api_key = self.api_key
+        try:
+            stripe.checkout.Session.expire(session_id)
+        except stripe.error.StripeError as exc:
+            logger.warning("Could not expire checkout session %s (likely already resolved): %s", session_id, exc)
+
 
 _stripe_service: Optional[StripeService] = None
 

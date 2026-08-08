@@ -75,6 +75,18 @@ class SlotTakenError(AppError):
     'try again shortly' situation."""
 
 
+class TooManyProcessingBookingsError(AppError):
+    """409 — this same client already has a booking sitting in
+    'processing' (checkout started, not yet paid or expired). Prevents
+    one person from stacking multiple simultaneous in-progress bookings.
+    Identified by request IP — a known, honest tradeoff: people sharing a
+    network (family on the same wifi, coworkers on the same office
+    connection) could trip this even though they're genuinely different
+    customers. Accepted because the error message gives a clear path
+    forward (check email to finish the existing one) rather than a hard
+    dead end."""
+
+
 class WebhookSignatureError(AppError):
     """400, not 401/403 — Stripe's own webhook documentation expects a 4xx
     on signature failure so it knows to stop retrying that specific event

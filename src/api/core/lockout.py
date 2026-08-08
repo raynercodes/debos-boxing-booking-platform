@@ -14,6 +14,7 @@ keyed by source IP (from the API Gateway event via Mangum's scope) once the
 MVP is stable.
 """
 
+import os
 import time
 from dataclasses import dataclass
 
@@ -21,6 +22,7 @@ from botocore.exceptions import ClientError, BotoCoreError
 
 from src.api.core.database import DynamoDBService
 from src.api.core.exceptions import LockedOutError, ExternalServiceError
+from src.api.core.ses_service import get_ses_service
 from src.api.core.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -93,20 +95,35 @@ class LockoutManager:
             logger.warning("Blocked login attempt — admin account currently locked out")
             raise LockedOutError(retry_after_seconds=record.locked_until - now)
 
-    def record_failed_attempt(self) -> None:
+    def record_failed_attempt(self, client_ip: str = "unknown") -> None:
         """Call after a failed password check. Escalates the lockout window
-        each time MAX_ATTEMPTS is hit again after a previous lockout."""
+        each time MAX_ATTEMPTS is hit again after a previous lockout.
+
+        client_ip is used ONLY for the 3rd-lockout+ security alert email —
+        it plays no role in the lockout logic itself, which remains keyed
+        purely on the admin email (see the module docstring's Phase 2 note
+        about per-IP lockout tracking, still not built, a separate concern
+        from this alert)."""
         record = self._get_record()
         attempts = record.attempts + 1
 
         try:
             if attempts >= self.MAX_ATTEMPTS:
+                # Pre-increment stage: 0 = about to become the 1st lockout,
+                # 1 = the 2nd, 2 = the 3rd. >=2 here means this specific
+                # attempt is triggering the 3rd (or later) separate
+                # lockout — a real, sustained attack pattern, not an
+                # honest forgotten password. That's the trigger point for
+                # the security alert email.
+                is_third_or_later_lockout = record.lockout_stage >= 2
+
                 window = self.LOCKOUT_WINDOWS[min(record.lockout_stage, len(self.LOCKOUT_WINDOWS) - 1)]
                 locked_until = int(time.time()) + window
+                new_stage = min(record.lockout_stage + 1, len(self.LOCKOUT_WINDOWS) - 1)
                 self._db.security_table.put_item(Item={
                     "security_key": self.LOCKOUT_KEY,
                     "attempts": 0,
-                    "lockout_stage": min(record.lockout_stage + 1, len(self.LOCKOUT_WINDOWS) - 1),
+                    "lockout_stage": new_stage,
                     "locked_until": locked_until,
                     "expires_at": locked_until + 3600,  # TTL cleanup, 1hr after lockout ends
                 })
@@ -114,6 +131,17 @@ class LockoutManager:
                     "Admin login locked out for %s seconds after %s failed attempts",
                     window, attempts,
                 )
+
+                if is_third_or_later_lockout:
+                    admin_email = os.environ.get("ADMIN_EMAIL")
+                    if admin_email:
+                        get_ses_service().send_brute_force_alert(
+                            ip_address=client_ip, lockout_count=new_stage, admin_email=admin_email,
+                        )
+                    logger.warning(
+                        "Brute-force alert: %s separate lockouts triggered from IP %s",
+                        new_stage, client_ip,
+                    )
             else:
                 self._db.security_table.put_item(Item={
                     "security_key": self.LOCKOUT_KEY,

@@ -118,6 +118,27 @@ class SesService:
         )
         self._send(admin_email, subject, body)
 
+    def send_brute_force_alert(self, ip_address: str, lockout_count: int, admin_email: str) -> None:
+        """Fires once an attacker hits the 3rd separate lockout — a sign
+        of a sustained attack, not an honest forgotten password. Purely
+        informational, deliberately no verification link or action
+        required — the activity is already being logged server-side, so
+        there's nothing for Debo to confirm, just something to be aware
+        of. Geo-location note: not included yet — this needs CloudFront's
+        real viewer-location headers, which don't exist until CloudFront
+        is actually enabled. Trivial to add here once that's live."""
+        subject = "Security alert: repeated failed login attempts on your admin login"
+        body = (
+            f"Someone has now been locked out {lockout_count} separate times trying to "
+            f"log into your admin panel.\n\n"
+            f"Source IP address: {ip_address}\n\n"
+            f"This is automatically logged — no action is required from you right now, "
+            f"but if this continues, that IP address can be manually blocked from "
+            f"reaching the site entirely.\n\n"
+            f"DEBO'S BOXING AND FITNESS — Security"
+        )
+        self._send(admin_email, subject, body)
+
     def send_reminder(self, booking: dict) -> None:
         subject = "Reminder: your booked training session with DEBO'S BOXING AND FITNESS is tomorrow"
         body = (

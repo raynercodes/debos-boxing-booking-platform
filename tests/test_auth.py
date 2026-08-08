@@ -111,3 +111,120 @@ def test_protected_endpoint_rejects_token_signed_with_wrong_secret(mock_aws_infr
     fake_token = pyjwt.encode({"role": "admin"}, "wrong-secret-entirely", algorithm="HS256")
     response = client.get("/bookings", headers={"Authorization": f"Bearer {fake_token}"})
     assert response.status_code == 401
+
+
+def test_blocked_ip_rejected_before_lockout_check(mock_aws_infra):
+    """A manually-blocked IP should never even reach the lockout system -
+    checked first, generic 403, reveals nothing about why."""
+    from src.api.core.ip_blocklist import IPBlocklist
+    from src.api.core.database import get_db_service
+    from src.api.routes.auth import get_client_ip
+    from src.api.main import app as main_app
+
+    blocklist = IPBlocklist(get_db_service())
+    blocklist.add_ip("198.51.100.5")
+
+    main_app.dependency_overrides[get_client_ip] = lambda: "198.51.100.5"
+    response = client.post("/auth/login", json={"email": ADMIN_EMAIL, "password": TEST_ADMIN_PASSWORD})
+    main_app.dependency_overrides.clear()
+
+    assert response.status_code == 403
+
+
+def test_unblocked_ip_not_blocked(mock_aws_infra):
+    """A different IP, never added to the blocklist, should be completely
+    unaffected — confirms the check is genuinely scoped per-IP."""
+    from src.api.core.ip_blocklist import IPBlocklist
+    from src.api.core.database import get_db_service
+    from src.api.routes.auth import get_client_ip
+    from src.api.main import app as main_app
+
+    blocklist = IPBlocklist(get_db_service())
+    blocklist.add_ip("198.51.100.5")
+
+    main_app.dependency_overrides[get_client_ip] = lambda: "198.51.100.99"
+    response = client.post("/auth/login", json={"email": ADMIN_EMAIL, "password": TEST_ADMIN_PASSWORD})
+    main_app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+
+
+def test_admin_can_block_and_unblock_ip_via_api(mock_aws_infra, admin_token):
+    add_response = client.post(
+        "/auth/blocked-ips/203.0.113.77", headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert add_response.status_code == 200
+
+    list_response = client.get("/auth/blocked-ips", headers={"Authorization": f"Bearer {admin_token}"})
+    assert "203.0.113.77" in list_response.json()["blocked_ips"]
+
+    remove_response = client.delete(
+        "/auth/blocked-ips/203.0.113.77", headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert remove_response.status_code == 200
+
+    list_after = client.get("/auth/blocked-ips", headers={"Authorization": f"Bearer {admin_token}"})
+    assert "203.0.113.77" not in list_after.json()["blocked_ips"]
+
+
+def test_blocked_ips_endpoint_requires_admin(mock_aws_infra):
+    response = client.get("/auth/blocked-ips")
+    assert response.status_code in (401, 403)
+
+
+def test_third_lockout_triggers_security_alert_email(mock_aws_infra):
+    """The 3rd separate lockout (not the 1st or 2nd) should trigger the
+    security alert email to the admin - a real, sustained attack pattern,
+    not an honest forgotten password."""
+    from unittest.mock import MagicMock
+    import src.api.core.ses_service as ses_module
+
+    mock_client = MagicMock()
+    ses_module.get_ses_service()._client = mock_client
+
+    # Each round: 5 wrong attempts triggers one lockout. Three rounds =
+    # three separate lockouts. Between rounds we can't actually wait out
+    # the real lockout window in a test, so we go straight through
+    # record_failed_attempt via repeated login attempts - the lockout
+    # itself blocks further ATTEMPTS but each blocked attempt while
+    # locked out does NOT count as a new failure, so we drive this
+    # directly through the LockoutManager instead of the HTTP layer for
+    # precise control over exactly 3 lockout EVENTS.
+    from src.api.core.lockout import LockoutManager
+    from src.api.core.database import get_db_service
+
+    lockout = LockoutManager(get_db_service())
+    for _round in range(3):
+        for _attempt in range(5):
+            lockout.record_failed_attempt(client_ip="192.0.2.50")
+        # Manually clear locked_until between rounds to simulate the
+        # lockout window having passed, without a real 15/30/60 min wait.
+        lockout._db.security_table.update_item(
+            Key={"security_key": lockout.LOCKOUT_KEY},
+            UpdateExpression="SET locked_until = :zero",
+            ExpressionAttributeValues={":zero": 0},
+        )
+
+    mock_client.send_email.assert_called_once()
+    kwargs = mock_client.send_email.call_args.kwargs
+    assert "192.0.2.50" in kwargs["Message"]["Body"]["Text"]["Data"]
+    assert "3" in kwargs["Message"]["Body"]["Text"]["Data"]
+
+
+def test_first_and_second_lockout_do_not_trigger_alert(mock_aws_infra):
+    """Confirms the alert is genuinely scoped to the 3rd+ lockout only -
+    an honest forgotten-password scenario (one lockout) shouldn't alarm
+    anyone."""
+    from unittest.mock import MagicMock
+    import src.api.core.ses_service as ses_module
+    from src.api.core.lockout import LockoutManager
+    from src.api.core.database import get_db_service
+
+    mock_client = MagicMock()
+    ses_module.get_ses_service()._client = mock_client
+
+    lockout = LockoutManager(get_db_service())
+    for _attempt in range(5):
+        lockout.record_failed_attempt(client_ip="192.0.2.60")
+
+    mock_client.send_email.assert_not_called()

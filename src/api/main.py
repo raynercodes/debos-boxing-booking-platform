@@ -16,6 +16,7 @@ from src.api.core.exceptions import (
     SlotProcessingError,
     SlotTakenError,
     TooManyProcessingBookingsError,
+    IPBlockedError,
     WebhookSignatureError,
 )
 from src.api.core.logging_config import get_logger
@@ -156,6 +157,11 @@ async def slot_taken_handler(request: Request, exc: SlotTakenError):
 @app.exception_handler(TooManyProcessingBookingsError)
 async def too_many_processing_handler(request: Request, exc: TooManyProcessingBookingsError):
     return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+
+@app.exception_handler(IPBlockedError)
+async def ip_blocked_handler(request: Request, exc: IPBlockedError):
+    return JSONResponse(status_code=403, content={"detail": str(exc)})
 
 
 @app.exception_handler(WebhookSignatureError)

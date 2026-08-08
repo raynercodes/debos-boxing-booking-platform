@@ -87,6 +87,15 @@ class TooManyProcessingBookingsError(AppError):
     dead end."""
 
 
+class IPBlockedError(AppError):
+    """403 — this specific IP has been manually added to the blocklist
+    (see core/ip_blocklist.py), typically after repeated brute-force
+    lockouts against the admin login. 403, not the generic 400, since
+    this is genuinely a permissions/access issue, not a malformed
+    request. Deliberately vague message — never confirms to an attacker
+    that their IP specifically is what's being blocked."""
+
+
 class WebhookSignatureError(AppError):
     """400, not 401/403 — Stripe's own webhook documentation expects a 4xx
     on signature failure so it knows to stop retrying that specific event

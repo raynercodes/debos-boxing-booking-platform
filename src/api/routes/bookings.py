@@ -10,7 +10,7 @@ from pydantic import BaseModel
 from src.api.models.booking import (
     BookingRequest, BookingResponse, BookingCheckoutResponse, BookingStatus,
     BOOKING_TYPE_RULES, CHECKOUT_SESSION_EXPIRY_MINUTES, AVAILABLE_TIMES_BY_TYPE,
-    LOCATION_DETAIL_TO_BOOKING_TYPE, requires_slot_claim,
+    BOOKING_TYPE_DISPLAY_NAMES, LOCATION_DETAIL_TO_BOOKING_TYPE, requires_slot_claim,
 )
 from src.api.core.security import get_security_service
 from src.api.core.database import get_db_service
@@ -180,7 +180,7 @@ async def create_booking(
         weekday_names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
         allowed_names = [weekday_names[d] for d in sorted(allowed_weekdays)]
         raise InvalidBookingRequestError(
-            f"{booking_type.value} is only available on: {', '.join(allowed_names)}"
+            f"{BOOKING_TYPE_DISPLAY_NAMES[booking_type.value]} is only available on: {', '.join(allowed_names)}"
         )
 
     # Price is ALWAYS looked up server-side from BOOKING_TYPE_RULES, never

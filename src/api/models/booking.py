@@ -135,6 +135,21 @@ CHECKOUT_SESSION_EXPIRY_MINUTES = 30
 # he wants. Kids/Adult are each treated as one class time (the window IS
 # the class), not multiple slots — confirm Adult isn't meant to be two
 # separate back-to-back one-hour sessions instead of one single time.
+# Friendly, customer-facing names for each booking type — deliberately
+# matching the exact labels already established on the Framer frontend
+# (pricing cards, dropdowns), so the whole system describes each offering
+# the same way. Used anywhere a booking type needs to appear in text a
+# real person reads (error messages, emails) instead of the raw enum
+# value like "genes_kids", which reads as an internal database identifier,
+# not something a customer should ever see.
+BOOKING_TYPE_DISPLAY_NAMES: dict[str, str] = {
+    "personal_client_travels": "Personal Training (Client Travels to Debo)",
+    "personal_trainer_travels": "Personal Training (Trainer Travels to You)",
+    "personal_virtual": "Virtual Personal Training",
+    "genes_adult": "Adult Group Class",
+    "genes_kids": "Kids Group Class",
+}
+
 AVAILABLE_TIMES_BY_TYPE: dict[str, list[str]] = {
     "personal_client_travels": ["07:00", "08:00", "09:00", "10:00", "11:00"],
     "personal_trainer_travels": ["07:00", "08:00", "09:00", "10:00", "11:00"],

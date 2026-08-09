@@ -227,6 +227,8 @@ def test_create_booking_wrong_weekday_for_valid_combo_rejected(mock_aws_infra):
     assert response.status_code == 422
     assert isinstance(response.json()["detail"], str)
     assert "only available on" in response.json()["detail"]
+    assert "Kids Group Class" in response.json()["detail"]
+    assert "genes_kids" not in response.json()["detail"]  # raw enum value should never leak to the customer
 
 
 def test_create_personal_virtual_booking_priced_correctly(mock_aws_infra, mock_stripe_checkout):

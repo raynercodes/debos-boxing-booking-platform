@@ -110,23 +110,6 @@ def test_missing_required_field_rejected(missing_field):
         BookingRequest(**payload)
 
 
-@pytest.mark.parametrize("location,detail", [
-    ("genes", "client_travels"),      # client_travels only valid for mobile_personal
-    ("genes", "trainer_travels"),     # same
-    ("mobile_personal", "adult"),     # adult only valid for genes
-    ("mobile_personal", "kids"),      # kids only valid for genes
-])
-def test_invalid_location_detail_combinations_rejected(location, detail):
-    """These are the exact combinations that DON'T exist in Debo's real
-    business — confirms the cross-field validator actually rejects every
-    invalid pairing, not just the one case manually spot-checked earlier."""
-    payload = _base_payload(location=location, session_detail=detail)
-    # session_date needs to be valid for SOME type to isolate the combo
-    # check itself rather than accidentally failing on the date check first
-    with pytest.raises(ValidationError):
-        BookingRequest(**payload)
-
-
 @pytest.mark.parametrize("booking_type,location,detail", [
     (BookingType.personal_client_travels, "mobile_personal", "client_travels"),
     (BookingType.personal_trainer_travels, "mobile_personal", "trainer_travels"),
@@ -143,17 +126,12 @@ def test_all_real_combinations_accepted(booking_type, location, detail):
     r = BookingRequest(**payload)
     assert r.booking_type == booking_type
 
-
-def test_wrong_weekday_for_valid_combo_rejected():
-    """genes_kids is Mon-Wed only — a VALID combo on an INVALID day should
-    still be rejected. This is different from the combo-rejection test
-    above: here the (location, detail) pair is real, only the date is wrong."""
-    today = datetime.now(timezone.utc).date()
-    # find a Thu/Fri/Sat/Sun (NOT in genes_kids' Mon-Wed allowed set)
-    for offset in range(7):
-        candidate = today + timedelta(days=offset)
-        if candidate.weekday() not in BOOKING_TYPE_RULES[BookingType.genes_kids]["allowed_weekdays"]:
-            bad_date = candidate.isoformat()
-            break
-    with pytest.raises(ValidationError):
-        BookingRequest(**_base_payload(session_date=bad_date, location="genes", session_detail="kids"))
+# Combo-mismatch and wrong-weekday rejection moved to test_bookings.py,
+# tested via real HTTP requests instead of direct model construction.
+# That validation now lives in the ROUTE (routes/bookings.py), not a
+# Pydantic model_validator — see InvalidBookingRequestError's docstring
+# in core/exceptions.py for why: the old model_validator raised a plain
+# ValueError, which Pydantic/FastAPI wrapped into an array-of-objects
+# response format the frontend couldn't render as text, crashing the
+# booking form. Testing this at the route level is also more correct
+# anyway — it's exactly where the real bug actually happened.

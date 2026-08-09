@@ -216,50 +216,19 @@ class BookingRequest(BaseModel):
             raise ValueError("session_time must be in 24-hour HH:MM format")
         return value
 
-    @model_validator(mode="after")
-    def validate_location_detail_combo_and_schedule(self) -> "BookingRequest":
-        """Two checks in one pass, since the second depends on the first
-        succeeding:
-
-        1. Is (location, session_detail) one of the 4 real combinations?
-           e.g. (genes, client_travels) is NOT a real offering — client_travels
-           only applies to mobile_personal. This is what actually prevents
-           the earlier design flaw: location and detail LOOK independent as
-           two separate fields, but they're not, and this check is what
-           enforces that instead of silently accepting a nonsense pairing.
-
-        2. Does session_date's actual weekday match a day the RESOLVED
-           booking_type is offered on? e.g. genes_kids is Mon-Wed only.
-
-        The Framer frontend will only ever present valid combinations as
-        selectable options, but per the same defense-in-depth reasoning
-        applied everywhere else in this file: never trust client-side
-        constraints as the ONLY enforcement. A direct API call bypasses
-        whatever the UI restricts."""
-        combo = (self.location, self.session_detail)
-        booking_type = LOCATION_DETAIL_TO_BOOKING_TYPE.get(combo)
-        if booking_type is None:
-            raise ValueError(
-                f"'{self.session_detail.value}' is not offered at location '{self.location.value}'"
-            )
-
-        session_date = datetime.strptime(self.session_date, "%Y-%m-%d")
-        allowed_weekdays = BOOKING_TYPE_RULES[booking_type]["allowed_weekdays"]
-        if session_date.weekday() not in allowed_weekdays:
-            weekday_names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
-            allowed_names = [weekday_names[d] for d in sorted(allowed_weekdays)]
-            raise ValueError(
-                f"{booking_type.value} is only available on: {', '.join(allowed_names)}"
-            )
-        return self
-
     @property
     def booking_type(self) -> BookingType:
         """Derived, not stored — the (location, session_detail) pair is the
         single source of truth. Computing this on demand means there's no
         way for a stored booking_type to ever drift out of sync with the
         location/session_detail it was derived from, since it's never
-        actually stored as separate state."""
+        actually stored as separate state.
+
+        Raises KeyError if the combo isn't real — the ROUTE is responsible
+        for checking combo validity via LOCATION_DETAIL_TO_BOOKING_TYPE
+        BEFORE ever accessing this property, same as it now handles the
+        weekday check. See InvalidBookingRequestError's docstring for why
+        this moved out of a Pydantic validator and into the route."""
         return LOCATION_DETAIL_TO_BOOKING_TYPE[(self.location, self.session_detail)]
 
 

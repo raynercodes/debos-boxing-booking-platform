@@ -197,10 +197,36 @@ def test_cancel_checkout_unknown_booking_returns_404(mock_aws_infra):
 
 def test_create_booking_invalid_location_detail_combo(mock_aws_infra):
     """genes + client_travels isn't a real offering — rejected at the API
-    boundary (422), never even reaching Stripe."""
+    boundary (422), never even reaching Stripe. Also confirms `detail` is
+    a clean STRING, not FastAPI's default array-of-objects validation
+    format — that mismatch was a real bug: the frontend tried to render
+    the array directly as text, which crashed the whole booking form
+    component in the browser."""
     payload = _booking_payload(BookingType.genes_kids, session_detail="client_travels")
     response = client.post("/bookings", json=payload)
     assert response.status_code == 422
+    assert isinstance(response.json()["detail"], str)
+    assert "not offered at location" in response.json()["detail"]
+
+
+def test_create_booking_wrong_weekday_for_valid_combo_rejected(mock_aws_infra):
+    """genes_kids is Mon-Wed only — a VALID combo on an INVALID day should
+    still be rejected, with the same clean string format. This is the
+    exact real-world scenario that was crashing the frontend before the
+    fix — worth its own dedicated route-level test, not just coverage at
+    the (now-removed) model-validator level."""
+    today = datetime.now(timezone.utc).date()
+    for offset in range(7):
+        candidate = today + timedelta(days=offset)
+        if candidate.weekday() not in BOOKING_TYPE_RULES[BookingType.genes_kids]["allowed_weekdays"]:
+            bad_date = candidate.isoformat()
+            break
+    payload = _booking_payload(BookingType.genes_kids)
+    payload["session_date"] = bad_date
+    response = client.post("/bookings", json=payload)
+    assert response.status_code == 422
+    assert isinstance(response.json()["detail"], str)
+    assert "only available on" in response.json()["detail"]
 
 
 def test_create_personal_virtual_booking_priced_correctly(mock_aws_infra, mock_stripe_checkout):

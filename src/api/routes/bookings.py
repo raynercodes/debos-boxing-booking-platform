@@ -10,7 +10,7 @@ from pydantic import BaseModel
 from src.api.models.booking import (
     BookingRequest, BookingResponse, BookingCheckoutResponse, BookingStatus,
     BOOKING_TYPE_RULES, CHECKOUT_SESSION_EXPIRY_MINUTES, AVAILABLE_TIMES_BY_TYPE,
-    requires_slot_claim,
+    LOCATION_DETAIL_TO_BOOKING_TYPE, requires_slot_claim,
 )
 from src.api.core.security import get_security_service
 from src.api.core.database import get_db_service
@@ -20,6 +20,7 @@ from src.api.core.ses_service import get_ses_service
 from src.api.core.exceptions import (
     AppError, BookingNotFoundError, BookingAlreadyCancelledError,
     SlotProcessingError, SlotTakenError, TooManyProcessingBookingsError,
+    InvalidBookingRequestError,
 )
 from src.api.core.logging_config import get_logger
 
@@ -157,13 +158,37 @@ async def create_booking(
             "that booking before starting another one."
         )
 
+    # Combo + schedule validation — moved here from a Pydantic model_validator
+    # that used to raise a plain ValueError. That got wrapped in FastAPI's
+    # own default validation format (an array of error objects), which our
+    # frontend couldn't render as text — a real bug that crashed the
+    # booking form. This explicit check raises a proper AppError subclass
+    # instead, returning the same clean string format every other
+    # rejection in this app already uses. Checked BEFORE any side effects
+    # (slot claims, DynamoDB writes), same discipline as the IP check above.
+    combo = (request.location, request.session_detail)
+    if combo not in LOCATION_DETAIL_TO_BOOKING_TYPE:
+        raise InvalidBookingRequestError(
+            f"'{request.session_detail.value}' is not offered at location '{request.location.value}'"
+        )
+
+    booking_type = request.booking_type  # safe now — combo is confirmed valid above
+
+    session_date_parsed = datetime.strptime(request.session_date, "%Y-%m-%d")
+    allowed_weekdays = BOOKING_TYPE_RULES[booking_type]["allowed_weekdays"]
+    if session_date_parsed.weekday() not in allowed_weekdays:
+        weekday_names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+        allowed_names = [weekday_names[d] for d in sorted(allowed_weekdays)]
+        raise InvalidBookingRequestError(
+            f"{booking_type.value} is only available on: {', '.join(allowed_names)}"
+        )
+
     # Price is ALWAYS looked up server-side from BOOKING_TYPE_RULES, never
     # accepted as a value from the client. If the client could send its own
     # price, anyone could book a $100 Gene's adult session and submit
     # price_usd=1 — the server is the only source of truth for what
     # something costs, the request only says WHAT was booked, never
     # WHAT IT COSTS.
-    booking_type = request.booking_type
     price_usd = BOOKING_TYPE_RULES[booking_type]["price_usd"]
     booking_id = str(uuid.uuid4())
 

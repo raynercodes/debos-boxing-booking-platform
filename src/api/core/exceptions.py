@@ -96,6 +96,25 @@ class IPBlockedError(AppError):
     that their IP specifically is what's being blocked."""
 
 
+class InvalidBookingRequestError(AppError):
+    """422 — covers both "not a real (location, session_detail) offering"
+    and "wrong day of week for this booking type." Was previously raised
+    as a plain ValueError inside a Pydantic model_validator, which Pydantic/
+    FastAPI wraps into ITS OWN default validation format — an array of
+    error objects, not a clean string. Our frontend everywhere else
+    expects a simple string in `detail`; that mismatch was a REAL bug —
+    the frontend tried to render the array directly, React threw an
+    uncaught "objects are not valid as a React child" error, and the
+    whole booking form component crashed and unmounted, which is exactly
+    why it looked like "the form disappeared and redirected to home" (all
+    one single-page site — the crashed section just vanished, revealing
+    whatever sits around it). Moved out of Pydantic and into the route as
+    an explicit check specifically so it goes through the same clean-
+    string exception handling every other business-rule violation in
+    this app already uses — this validator was the one inconsistent
+    exception to that pattern, and that inconsistency is what broke."""
+
+
 class WebhookSignatureError(AppError):
     """400, not 401/403 — Stripe's own webhook documentation expects a 4xx
     on signature failure so it knows to stop retrying that specific event

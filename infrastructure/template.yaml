@@ -49,6 +49,7 @@ Parameters:
       the post-payment redirect page won't be real until Framer is wired in.
 
 Conditions:
+  IsDev: !Equals [!Ref Environment, "dev"]
   IsProd: !Equals [!Ref Environment, "prod"]
   # Staging needs a stable custom domain too — not just prod. A Framer
   # staging site needs a URL it can hardcode permanently, and the raw
@@ -492,6 +493,17 @@ Resources:
   # -------------------------------------------------------
   SesDomainIdentity:
     Type: AWS::SES::EmailIdentity
+    # Only dev creates this - SES domain identities are per-DOMAIN, not
+    # per-environment. debosboxingandfitness.com was already verified as
+    # part of the dev stack; staging/prod trying to create their OWN copy
+    # of this same identity is a genuine conflict (SES rejects a second
+    # identity resource for a domain that's already registered), not
+    # something environment-scoped naming can work around. Staging/prod
+    # Lambdas can still send real email through this same verified domain
+    # regardless - their runtime ses:SendEmail permission is scoped
+    # broadly (Resource: "*"), not tied to which stack owns this
+    # CloudFormation resource.
+    Condition: IsDev
     Properties:
       EmailIdentity: debosboxingandfitness.com
 

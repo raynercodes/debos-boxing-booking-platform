@@ -24,6 +24,13 @@ logger = get_logger(__name__)
 
 FROM_ADDRESS = "bookings@debosboxingandfitness.com"
 
+# Real, not placeholder — only ever surfaced in transactional emails where
+# there's a legitimate, immediate reason someone would need it (a
+# confirmed or just-cancelled real booking). Deliberately never displayed
+# on the public marketing site itself — Debo's own call, keeping his
+# personal number out of anything a random visitor could stumble across.
+ADMIN_PHONE_NUMBER = "(912)-278-1181"
+
 
 class SesService:
     def __init__(self) -> None:
@@ -80,6 +87,7 @@ class SesService:
             f"Hi {booking['name']},\n\n"
             f"Your booked session is confirmed for {booking['session_date']} at {booking['session_time']} with Debo.\n\n"
             f"See you then — please arrive on time, geared up and ready to be great!\n\n"
+            f"Questions before your session? Reach Debo directly at {ADMIN_PHONE_NUMBER} or debosboxingandfitness@gmail.com.\n\n"
             f"DEBO'S BOXING AND FITNESS"
         )
         self._send(booking["email"], subject, body)
@@ -103,7 +111,7 @@ class SesService:
             f"Hi {booking['name']},\n\n"
             f"Sorry to inform you, but your session on {booking['session_date']} at {booking['session_time']} has been cancelled by Debo.\n\n"
             f"Cancelation reason: {reason}\n\n"
-            f"If you have any questions or want to rebook, please reach out to Debo directly on his personal number or email at debosboxingandfitness@gmail.com.\n\n"
+            f"If you have any questions or want to rebook, please reach out to Debo directly at {ADMIN_PHONE_NUMBER} or debosboxingandfitness@gmail.com.\n\n"
             f"DEBO'S BOXING AND FITNESS"
         )
         self._send(booking["email"], subject, body)
@@ -127,7 +135,7 @@ class SesService:
         of. Geo-location note: not included yet — this needs CloudFront's
         real viewer-location headers, which don't exist until CloudFront
         is actually enabled. Trivial to add here once that's live."""
-        subject = "Security alert: repeated failed login attempts on your admin login"
+        subject = "Security alert: repeated failed login attempts on your booking site"
         body = (
             f"Someone has now been locked out {lockout_count} separate times trying to "
             f"log into your admin panel.\n\n"

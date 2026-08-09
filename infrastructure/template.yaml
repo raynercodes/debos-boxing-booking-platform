@@ -19,6 +19,25 @@ Parameters:
       works immediately regardless of this restriction, so the site is never
       blocked waiting on CloudFront specifically.
 
+  EnableCustomDomain:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: >
+      Gates RegionalDomainName + RegionalDomainMapping specifically. This
+      exists because of a genuine, long-standing, still-unresolved
+      SAM/CloudFormation limitation: on a brand-new API's first-ever
+      deploy, the auto-generated API Gateway Stage gets a random hash-based
+      logical ID that can't be reliably referenced via DependsOn, so
+      BasePathMapping can race ahead of the stage actually existing and
+      fail with "Invalid stage identifier specified." The documented
+      workaround (confirmed across many real-world reports of this exact
+      SAM issue) is to deploy twice: once with this false (creates the API
+      + its stage cleanly), then again with this true (the stage already
+      exists by then, so the mapping succeeds). Only relevant for a
+      brand-new environment's very first deploy — leave true permanently
+      once it's succeeded once.
+
   RegionalCustomDomainCertArn:
     Type: String
     Default: ""
@@ -59,6 +78,7 @@ Conditions:
   # external (no staging Framer clone) is ever expected to point at dev.
   IsStagingOrProd: !Or [!Condition IsProd, !Equals [!Ref Environment, "staging"]]
   DeployCloudFront: !And [!Condition IsProd, !Equals [!Ref EnableCloudFront, "true"]]
+  DeployCustomDomain: !And [!Condition IsStagingOrProd, !Equals [!Ref EnableCustomDomain, "true"]]
 
 Globals:
   Function:
@@ -413,7 +433,7 @@ Resources:
   # -------------------------------------------------------
   RegionalDomainName:
     Type: AWS::ApiGateway::DomainName
-    Condition: IsStagingOrProd
+    Condition: DeployCustomDomain
     Properties:
       DomainName: !If [IsProd, "api.debosboxingandfitness.com", "staging-api.debosboxingandfitness.com"]
       RegionalCertificateArn: !Ref RegionalCustomDomainCertArn
@@ -424,7 +444,7 @@ Resources:
 
   RegionalDomainMapping:
     Type: AWS::ApiGateway::BasePathMapping
-    Condition: IsStagingOrProd
+    Condition: DeployCustomDomain
     Properties:
       DomainName: !Ref RegionalDomainName
       RestApiId: !Ref BookingApi
@@ -646,7 +666,7 @@ Outputs:
       Name: !Sub debos-boxing-api-url-${Environment}
 
   RegionalDomainTarget:
-    Condition: IsStagingOrProd
+    Condition: DeployCustomDomain
     Description: "Add this as a CNAME record at Namecheap for api.debosboxingandfitness.com"
     Value: !GetAtt RegionalDomainName.RegionalDomainName
     Export:

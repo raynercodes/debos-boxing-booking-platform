@@ -337,6 +337,17 @@ Resources:
       Handler: src.api.main.handler
       Role: !GetAtt LambdaExecutionRole.Arn
       Tracing: Active
+      # Overrides the 256MB global default - specifically for this
+      # function, not the whole system. Admin login runs 600,000 PBKDF2
+      # iterations (OWASP's current recommendation, deliberately
+      # expensive by design to resist brute-forcing - NOT something to
+      # weaken for speed). Lambda's CPU scales with memory, so more
+      # memory here means more CPU for that same fixed, non-negotiable
+      # computation - genuinely faster without touching security at all.
+      # Since Lambda billing is memory x duration, a roughly proportional
+      # drop in duration keeps the real cost close to flat, sometimes
+      # even lower, despite the higher memory number.
+      MemorySize: 1024
       Events:
         ApiEvent:
           Type: Api

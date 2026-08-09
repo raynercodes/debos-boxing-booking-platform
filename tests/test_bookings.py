@@ -574,19 +574,21 @@ def test_history_visibility_filter_excludes_past_bookings(mock_aws_infra, admin_
     admin LIST view, but remain fully fetchable by ID — the record is never
     deleted, only hidden from the default list.
 
-    NOTE: constructs the past time as today's date at 00:05 UTC, which is
-    safely >1hr in the past for any test run after ~01:05 UTC — the only
-    edge case this doesn't cover is a test suite run in the first ~65
-    minutes of the UTC day, an accepted, extremely low-probability gap."""
+    Computed as 2 hours before whenever this test actually runs, not a
+    hardcoded "00:05 today" — that earlier approach had a real, self-
+    documented ~65-minute daily blind spot (any CI run landing in the
+    first hour of UTC day), which is exactly what failed once a real run
+    happened to land at 00:00-00:01 UTC. This version is unconditionally
+    correct regardless of what time the suite runs."""
     from src.api.core.bookings_repository import BookingRepository
     from src.api.core.database import get_db_service
 
     repo = BookingRepository(get_db_service())
-    today = datetime.now(timezone.utc).date()
+    past_moment = datetime.now(timezone.utc) - timedelta(hours=2)
     past_item = {
         "booking_id": "past-visibility-test-id",
         "name": "Past Client", "email": "past@example.com", "phone": "4045551234",
-        "session_date": today.isoformat(), "session_time": "00:05",
+        "session_date": past_moment.date().isoformat(), "session_time": past_moment.strftime("%H:%M"),
         "booking_type": "genes_adult", "location": "genes", "session_detail": "adult",
         "price_usd": 100, "status": "confirmed",
         "created_at": datetime.now(timezone.utc).isoformat(), "reminder_sent": False,

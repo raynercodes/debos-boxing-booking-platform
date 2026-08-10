@@ -18,6 +18,7 @@ from src.api.core.exceptions import (
     TooManyProcessingBookingsError,
     IPBlockedError,
     InvalidBookingRequestError,
+    NoShowTooEarlyError,
     WebhookSignatureError,
 )
 from src.api.core.logging_config import get_logger
@@ -167,6 +168,11 @@ async def ip_blocked_handler(request: Request, exc: IPBlockedError):
 
 @app.exception_handler(InvalidBookingRequestError)
 async def invalid_booking_request_handler(request: Request, exc: InvalidBookingRequestError):
+    return JSONResponse(status_code=422, content={"detail": str(exc)})
+
+
+@app.exception_handler(NoShowTooEarlyError)
+async def no_show_too_early_handler(request: Request, exc: NoShowTooEarlyError):
     return JSONResponse(status_code=422, content={"detail": str(exc)})
 
 

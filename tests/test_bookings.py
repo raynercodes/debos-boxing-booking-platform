@@ -97,6 +97,31 @@ def test_create_booking_starts_checkout_not_confirmed(mock_aws_infra, mock_strip
     assert body["checkout_url"] == "https://checkout.stripe.com/test-session-url"
 
 
+def test_webhook_confirmation_fetches_and_stores_receipt_url(mock_aws_infra, mock_stripe_checkout, mock_stripe_webhook_verify):
+    """Confirms the webhook actually fetches Stripe's real hosted receipt
+    URL at confirmation time and stores it on the booking record — this
+    is the piece both the confirmation email AND (later) the cancellation
+    email's refund link depend on."""
+    from unittest.mock import patch, MagicMock
+    from src.api.core.bookings_repository import BookingRepository
+    from src.api.core.database import get_db_service
+
+    created = client.post("/bookings", json=_booking_payload(BookingType.genes_kids))
+    booking_id = created.json()["booking_id"]
+
+    fake_charge = MagicMock()
+    fake_charge.receipt_url = "https://pay.stripe.com/receipts/real-fake-one"
+    fake_session = MagicMock()
+    fake_session.payment_intent.latest_charge = fake_charge
+
+    with patch("stripe.checkout.Session.retrieve", return_value=fake_session):
+        _confirm_via_webhook(booking_id, mock_stripe_webhook_verify)
+
+    repo = BookingRepository(get_db_service())
+    stored = repo.get_by_id(booking_id)
+    assert stored["receipt_url"] == "https://pay.stripe.com/receipts/real-fake-one"
+
+
 def test_create_booking_sends_checkout_link_email(mock_aws_infra, mock_stripe_checkout):
     """The recovery-path email — sent the moment checkout STARTS, not on
     confirmation, so someone who closes the tab before paying isn't
@@ -571,6 +596,222 @@ def test_repository_rejects_duplicate_booking_id(mock_aws_infra):
         repo.create(item)
 
 
+def test_cancel_before_session_time_auto_refunds(mock_aws_infra, admin_token):
+    """The core new behavior — cancelling a genuinely paid booking BEFORE
+    its session time should automatically issue a full Stripe refund, no
+    manual action from Debo required."""
+    from unittest.mock import patch, MagicMock
+    from src.api.core.bookings_repository import BookingRepository
+    from src.api.core.database import get_db_service
+
+    future = (datetime.now(timezone.utc) + timedelta(days=3))
+    repo = BookingRepository(get_db_service())
+    item = {
+        "booking_id": "refund-test-id",
+        "name": "Refund Client", "email": "refund@example.com", "phone": "4045551234",
+        "session_date": future.date().isoformat(), "session_time": "10:00",
+        "booking_type": "genes_adult", "location": "genes", "session_detail": "adult",
+        "price_usd": 100, "status": "confirmed",
+        "stripe_session_id": "cs_test_refund_target",
+        "receipt_url": "https://pay.stripe.com/receipts/fake",
+        "created_at": datetime.now(timezone.utc).isoformat(), "reminder_sent": False,
+    }
+    repo.create(item)
+
+    fake_session = MagicMock()
+    fake_session.payment_intent = "pi_test_fake"
+    fake_refund = MagicMock()
+    fake_refund.id = "re_test_fake"
+    fake_refund.amount = 10000  # cents
+    fake_refund.status = "succeeded"
+
+    with patch("stripe.checkout.Session.retrieve", return_value=fake_session), \
+         patch("stripe.Refund.create", return_value=fake_refund) as mock_refund_create:
+        response = client.patch(
+            f"/bookings/{item['booking_id']}/cancel",
+            headers={"Authorization": f"Bearer {admin_token}"},
+        )
+
+    assert response.status_code == 200
+    mock_refund_create.assert_called_once_with(payment_intent="pi_test_fake")
+
+
+def test_cancel_after_session_time_does_not_refund(mock_aws_infra, admin_token):
+    """Cancelling something that already happened (a no-show, or admin
+    cleanup) must NOT auto-refund — that's Debo's manual call, not an
+    automatic one."""
+    from unittest.mock import patch
+    from src.api.core.bookings_repository import BookingRepository
+    from src.api.core.database import get_db_service
+
+    past = (datetime.now(timezone.utc) - timedelta(days=3))
+    repo = BookingRepository(get_db_service())
+    item = {
+        "booking_id": "past-refund-test-id",
+        "name": "Past Client", "email": "past@example.com", "phone": "4045551234",
+        "session_date": past.date().isoformat(), "session_time": "10:00",
+        "booking_type": "genes_adult", "location": "genes", "session_detail": "adult",
+        "price_usd": 100, "status": "confirmed",
+        "stripe_session_id": "cs_test_should_not_refund",
+        "receipt_url": "https://pay.stripe.com/receipts/fake",
+        "created_at": datetime.now(timezone.utc).isoformat(), "reminder_sent": False,
+    }
+    repo.create(item)
+
+    with patch("stripe.Refund.create") as mock_refund_create:
+        response = client.patch(
+            f"/bookings/{item['booking_id']}/cancel",
+            headers={"Authorization": f"Bearer {admin_token}"},
+        )
+
+    assert response.status_code == 200
+    mock_refund_create.assert_not_called()
+
+
+def test_cancel_never_paid_booking_does_not_refund(mock_aws_infra, admin_token):
+    """A booking that never actually completed payment (no receipt_url —
+    e.g. still processing, or expired) has nothing to refund. Confirms the
+    eligibility check is genuinely gated on proof of a real charge, not
+    just booking existence."""
+    from unittest.mock import patch
+    from src.api.core.bookings_repository import BookingRepository
+    from src.api.core.database import get_db_service
+
+    future = (datetime.now(timezone.utc) + timedelta(days=3))
+    repo = BookingRepository(get_db_service())
+    item = {
+        "booking_id": "never-paid-test-id",
+        "name": "Never Paid", "email": "neverpaid@example.com", "phone": "4045551234",
+        "session_date": future.date().isoformat(), "session_time": "10:00",
+        "booking_type": "genes_adult", "location": "genes", "session_detail": "adult",
+        "price_usd": 100, "status": "processing",
+        "created_at": datetime.now(timezone.utc).isoformat(), "reminder_sent": False,
+    }
+    repo.create(item)
+
+    with patch("stripe.Refund.create") as mock_refund_create:
+        response = client.patch(
+            f"/bookings/{item['booking_id']}/cancel",
+            headers={"Authorization": f"Bearer {admin_token}"},
+        )
+
+    assert response.status_code == 200
+    mock_refund_create.assert_not_called()
+
+
+def test_two_hour_adult_class_still_visible_partway_through(mock_aws_infra, admin_token):
+    """The actual bug this duration-awareness fix addresses: a 2-hour
+    Adult class must still show up in the admin list 1hr20min after it
+    starts — it's still happening. The old fixed-1hr-from-start logic
+    would have incorrectly hidden it while the class was still in
+    progress."""
+    from src.api.core.bookings_repository import BookingRepository
+    from src.api.core.database import get_db_service
+
+    repo = BookingRepository(get_db_service())
+    started = datetime.now(timezone.utc) - timedelta(hours=1, minutes=20)
+    item = {
+        "booking_id": "in-progress-adult-class",
+        "name": "Still Here", "email": "here@example.com", "phone": "4045551234",
+        "session_date": started.date().isoformat(), "session_time": started.strftime("%H:%M"),
+        "booking_type": "genes_adult", "location": "genes", "session_detail": "adult",
+        "price_usd": 100, "status": "confirmed",
+        "created_at": datetime.now(timezone.utc).isoformat(), "reminder_sent": False,
+    }
+    repo.create(item)
+
+    response = client.get("/bookings", headers={"Authorization": f"Bearer {admin_token}"})
+    booking_ids = [b["booking_id"] for b in response.json()]
+    assert item["booking_id"] in booking_ids
+
+
+def test_no_show_before_session_end_rejected(mock_aws_infra, admin_token):
+    """Can't mark something a no-show before its session has actually
+    concluded — you can't know someone didn't show up for something that
+    hasn't happened yet."""
+    from src.api.core.bookings_repository import BookingRepository
+    from src.api.core.database import get_db_service
+
+    future = datetime.now(timezone.utc) + timedelta(hours=1)
+    repo = BookingRepository(get_db_service())
+    item = {
+        "booking_id": "too-early-no-show",
+        "name": "Future Client", "email": "future@example.com", "phone": "4045551234",
+        "session_date": future.date().isoformat(), "session_time": future.strftime("%H:%M"),
+        "booking_type": "genes_kids", "location": "genes", "session_detail": "kids",
+        "price_usd": 90, "status": "confirmed",
+        "created_at": datetime.now(timezone.utc).isoformat(), "reminder_sent": False,
+    }
+    repo.create(item)
+
+    response = client.patch(
+        f"/bookings/{item['booking_id']}/cancel",
+        json={"cancellation_type": "no_show"},
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert response.status_code == 422
+    assert "no-show" in response.json()["detail"].lower()
+
+
+def test_no_show_after_session_end_succeeds_without_refund(mock_aws_infra, admin_token):
+    """Once the session has genuinely concluded, no-show cancellation is
+    allowed — and never auto-refunds, even for a fully paid booking that
+    would otherwise be refund-eligible on timing alone."""
+    from unittest.mock import patch
+    from src.api.core.bookings_repository import BookingRepository
+    from src.api.core.database import get_db_service
+
+    past = datetime.now(timezone.utc) - timedelta(hours=3)
+    repo = BookingRepository(get_db_service())
+    item = {
+        "booking_id": "real-no-show",
+        "name": "Ghost Client", "email": "ghost@example.com", "phone": "4045551234",
+        "session_date": past.date().isoformat(), "session_time": past.strftime("%H:%M"),
+        "booking_type": "genes_kids", "location": "genes", "session_detail": "kids",
+        "price_usd": 90, "status": "confirmed",
+        "stripe_session_id": "cs_test_no_show", "receipt_url": "https://pay.stripe.com/receipts/fake",
+        "created_at": datetime.now(timezone.utc).isoformat(), "reminder_sent": False,
+    }
+    repo.create(item)
+
+    with patch("stripe.Refund.create") as mock_refund_create:
+        response = client.patch(
+            f"/bookings/{item['booking_id']}/cancel",
+            json={"cancellation_type": "no_show"},
+            headers={"Authorization": f"Bearer {admin_token}"},
+        )
+
+    assert response.status_code == 200
+    mock_refund_create.assert_not_called()
+
+
+def test_emergency_cancellation_unrestricted_by_time(mock_aws_infra, admin_token):
+    """Unlike no-show, "emergency" (Debo's own side) stays unrestricted by
+    time — he can cancel for his own reasons whenever, not just before a
+    session technically starts."""
+    from src.api.core.bookings_repository import BookingRepository
+    from src.api.core.database import get_db_service
+
+    past = datetime.now(timezone.utc) - timedelta(hours=3)
+    repo = BookingRepository(get_db_service())
+    item = {
+        "booking_id": "late-emergency-cancel",
+        "name": "Any Time Client", "email": "anytime@example.com", "phone": "4045551234",
+        "session_date": past.date().isoformat(), "session_time": past.strftime("%H:%M"),
+        "booking_type": "genes_kids", "location": "genes", "session_detail": "kids",
+        "price_usd": 90, "status": "confirmed",
+        "created_at": datetime.now(timezone.utc).isoformat(), "reminder_sent": False,
+    }
+    repo.create(item)
+
+    response = client.patch(
+        f"/bookings/{item['booking_id']}/cancel",
+        json={"cancellation_type": "emergency"},
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert response.status_code == 200
+
+
 def test_cancel_completed_booking_still_succeeds(mock_aws_infra, admin_token):
     """Confirms the double-cancel guard ONLY blocks the specific case of
     already-cancelled — a 'completed' booking (or any other non-cancelled
@@ -598,11 +839,20 @@ def test_cancel_completed_booking_still_succeeds(mock_aws_infra, admin_token):
 
 
 def test_history_visibility_filter_excludes_past_bookings(mock_aws_infra, admin_token):
-    """A booking more than 1hr past its start time should disappear from the
-    admin LIST view, but remain fully fetchable by ID — the record is never
-    deleted, only hidden from the default list.
+    """A booking sufficiently past its REAL end time (accounting for
+    type-specific duration, not a fixed 1hr-from-start assumption) should
+    disappear from the admin LIST view, but remain fully fetchable by ID —
+    the record is never deleted, only hidden from the default list.
 
-    Computed as 2 hours before whenever this test actually runs, not a
+    Uses genes_kids specifically (1hr duration) so "4 hours before now"
+    is unambiguously past both the session AND the 1hr grace period,
+    regardless of which type's duration applies — genes_adult (2hr
+    duration) would need a larger offset to still land past its real end,
+    which is exactly the bug this whole feature fixed: a fixed offset
+    that's safely "past" for one type isn't automatically safely "past"
+    for a longer one.
+
+    Computed as N hours before whenever this test actually runs, not a
     hardcoded "00:05 today" — that earlier approach had a real, self-
     documented ~65-minute daily blind spot (any CI run landing in the
     first hour of UTC day), which is exactly what failed once a real run
@@ -612,13 +862,13 @@ def test_history_visibility_filter_excludes_past_bookings(mock_aws_infra, admin_
     from src.api.core.database import get_db_service
 
     repo = BookingRepository(get_db_service())
-    past_moment = datetime.now(timezone.utc) - timedelta(hours=2)
+    past_moment = datetime.now(timezone.utc) - timedelta(hours=4)
     past_item = {
         "booking_id": "past-visibility-test-id",
         "name": "Past Client", "email": "past@example.com", "phone": "4045551234",
         "session_date": past_moment.date().isoformat(), "session_time": past_moment.strftime("%H:%M"),
-        "booking_type": "genes_adult", "location": "genes", "session_detail": "adult",
-        "price_usd": 100, "status": "confirmed",
+        "booking_type": "genes_kids", "location": "genes", "session_detail": "kids",
+        "price_usd": 90, "status": "confirmed",
         "created_at": datetime.now(timezone.utc).isoformat(), "reminder_sent": False,
     }
     repo.create(past_item)

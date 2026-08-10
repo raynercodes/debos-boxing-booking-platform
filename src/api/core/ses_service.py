@@ -29,7 +29,7 @@ FROM_ADDRESS = "bookings@debosboxingandfitness.com"
 # confirmed or just-cancelled real booking). Deliberately never displayed
 # on the public marketing site itself — Debo's own call, keeping his
 # personal number out of anything a random visitor could stumble across.
-ADMIN_PHONE_NUMBER = "(912)-278-1181"
+ADMIN_PHONE_NUMBER = "(912) 278-1181"
 
 
 class SesService:
@@ -81,14 +81,16 @@ class SesService:
         )
         self._send(booking["email"], subject, body)
 
-    def send_booking_confirmation(self, booking: dict) -> None:
+    def send_booking_confirmation(self, booking: dict, receipt_url: str = None) -> None:
         subject = "Your session with DEBO'S BOXING AND FITNESS is confirmed!"
+        receipt_line = f"\nYour payment receipt: {receipt_url}\n" if receipt_url else ""
         body = (
             f"Hi {booking['name']},\n\n"
             f"Your booked session is confirmed for {booking['session_date']} at {booking['session_time']} with Debo.\n\n"
-            f"See you then — please arrive on time, geared up and ready to be great!\n\n"
+            f"See you then — please arrive on time, geared up and ready to be great!\n"
+            f"{receipt_line}\n"
             f"Questions before your session? Reach Debo directly at {ADMIN_PHONE_NUMBER} or debosboxingandfitness@gmail.com.\n\n"
-            f"DEBO'S BOXING AND FITNESS"
+            f"Debo's Boxing and Fitness"
         )
         self._send(booking["email"], subject, body)
 
@@ -105,12 +107,21 @@ class SesService:
         )
         self._send(admin_email, subject, body)
 
-    def send_cancellation_notice_to_client(self, booking: dict, reason: str) -> None:
+    def send_cancellation_notice_to_client(self, booking: dict, reason: str, refund_info: dict = None) -> None:
         subject = "Your booked session at DEBO'S BOXING AND FITNESS has been cancelled"
+        refund_line = ""
+        if refund_info:
+            refund_line = (
+                f"\nA refund of ${refund_info['amount_usd']:.2f} has been issued back to your original "
+                f"payment method — please allow 5-10 business days for it to appear on your statement.\n"
+            )
+            if refund_info.get("receipt_url"):
+                refund_line += f"You can view the refund on your receipt here: {refund_info['receipt_url']}\n"
         body = (
             f"Hi {booking['name']},\n\n"
             f"Sorry to inform you, but your session on {booking['session_date']} at {booking['session_time']} has been cancelled by Debo.\n\n"
-            f"Cancelation reason: {reason}\n\n"
+            f"Cancelation reason: {reason}\n"
+            f"{refund_line}\n"
             f"If you have any questions or want to rebook, please reach out to Debo directly at {ADMIN_PHONE_NUMBER} or debosboxingandfitness@gmail.com.\n\n"
             f"DEBO'S BOXING AND FITNESS"
         )

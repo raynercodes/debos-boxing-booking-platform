@@ -93,6 +93,21 @@ class BookingRepository:
             logger.error("Failed to mark reminder sent for booking %s: %s", booking_id, exc, exc_info=True)
             raise ExternalServiceError("Unable to update reminder status") from exc
 
+    def set_receipt_url(self, booking_id: str, receipt_url: str) -> None:
+        """Stored once at confirmation time, reused later for the
+        cancellation email too — Stripe's hosted receipt page is dynamic,
+        so the SAME link shows "Refunded" if a refund is later issued
+        against it. One fetch, two emails."""
+        try:
+            self._db.bookings_table.update_item(
+                Key={"booking_id": booking_id},
+                UpdateExpression="SET receipt_url = :url",
+                ExpressionAttributeValues={":url": receipt_url},
+            )
+        except (ClientError, BotoCoreError) as exc:
+            logger.error("Failed to store receipt_url for booking %s: %s", booking_id, exc, exc_info=True)
+            raise ExternalServiceError("Unable to update booking") from exc
+
     def set_stripe_session_id(self, booking_id: str, stripe_session_id: str) -> None:
         """Stored so /cancel-checkout can look up and force-expire the
         exact Stripe session when someone explicitly cancels — the

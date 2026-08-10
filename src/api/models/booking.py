@@ -1,5 +1,5 @@
 import re
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import ClassVar, Dict, Set, Tuple, Optional
 
@@ -102,12 +102,30 @@ LOCATION_DETAIL_TO_BOOKING_TYPE: Dict[Tuple[Location, SessionDetail], BookingTyp
 # weekday() returns 0=Monday ... 6=Sunday, which is why the allowed-day sets
 # below use those integers rather than day names.
 BOOKING_TYPE_RULES: Dict[BookingType, dict] = {
-    BookingType.personal_client_travels: {"price_usd": 40, "allowed_weekdays": {0, 1, 2, 3, 4}},  # Mon-Fri
-    BookingType.personal_trainer_travels: {"price_usd": 50, "allowed_weekdays": {0, 1, 2, 3, 4}},  # Mon-Fri
-    BookingType.personal_virtual: {"price_usd": 40, "allowed_weekdays": {0, 1, 2, 3, 4}},  # Mon-Fri
-    BookingType.genes_adult: {"price_usd": 100, "allowed_weekdays": {0, 1, 2, 3}},  # Mon-Thu
-    BookingType.genes_kids: {"price_usd": 90, "allowed_weekdays": {0, 1, 2}},  # Mon-Wed
+    BookingType.personal_client_travels: {"price_usd": 40, "allowed_weekdays": {0, 1, 2, 3, 4}, "duration_hours": 1},  # Mon-Fri
+    BookingType.personal_trainer_travels: {"price_usd": 50, "allowed_weekdays": {0, 1, 2, 3, 4}, "duration_hours": 1},  # Mon-Fri
+    BookingType.personal_virtual: {"price_usd": 40, "allowed_weekdays": {0, 1, 2, 3, 4}, "duration_hours": 1},  # Mon-Fri
+    BookingType.genes_adult: {"price_usd": 100, "allowed_weekdays": {0, 1, 2, 3}, "duration_hours": 2},  # Mon-Thu, 5-7PM confirmed
+    BookingType.genes_kids: {"price_usd": 90, "allowed_weekdays": {0, 1, 2}, "duration_hours": 1},  # Mon-Wed, 4-5PM confirmed
 }
+
+
+def get_session_end_datetime(item: dict) -> datetime:
+    """The single source of truth for "when does this session actually
+    end" — accounts for each type's real duration instead of assuming a
+    uniform window. This matters concretely: Adult class is 2 hours
+    (5-7PM), not 1 like everything else — any fixed-duration assumption
+    anywhere in this codebase (admin list visibility, refund eligibility,
+    no-show enforcement) would incorrectly treat an Adult class as over
+    while it's still actually happening. Used everywhere "has this
+    session concluded" needs a real, correct answer, not everywhere
+    "session start time" is asked instead — those are different
+    questions with different correct implementations."""
+    start = datetime.strptime(
+        f"{item['session_date']} {item['session_time']}", "%Y-%m-%d %H:%M"
+    ).replace(tzinfo=timezone.utc)
+    duration_hours = BOOKING_TYPE_RULES[BookingType(item["booking_type"])]["duration_hours"]
+    return start + timedelta(hours=duration_hours)
 
 KIDS_AGE_RANGE = "6-13"  # confirmed — used for the UI label, e.g. "Kids (ages 6-13)"
 
@@ -143,7 +161,7 @@ CHECKOUT_SESSION_EXPIRY_MINUTES = 30
 # value like "genes_kids", which reads as an internal database identifier,
 # not something a customer should ever see.
 BOOKING_TYPE_DISPLAY_NAMES: dict[str, str] = {
-    "personal_client_travels": "Personal Training (Client Travels to Debo)",
+    "personal_client_travels": "Personal Training (Client Travels to You)",
     "personal_trainer_travels": "Personal Training (Trainer Travels to You)",
     "personal_virtual": "Virtual Personal Training",
     "genes_adult": "Adult Group Class",

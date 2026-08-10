@@ -1,7 +1,7 @@
 import os
 import uuid
 from datetime import datetime, timezone, timedelta
-from typing import Optional, List
+from typing import Optional, List, Literal
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import HTMLResponse
 from fastapi.security import HTTPBearer
@@ -11,6 +11,7 @@ from src.api.models.booking import (
     BookingRequest, BookingResponse, BookingCheckoutResponse, BookingStatus,
     BOOKING_TYPE_RULES, CHECKOUT_SESSION_EXPIRY_MINUTES, AVAILABLE_TIMES_BY_TYPE,
     BOOKING_TYPE_DISPLAY_NAMES, LOCATION_DETAIL_TO_BOOKING_TYPE, requires_slot_claim,
+    get_session_end_datetime,
 )
 from src.api.core.security import get_security_service
 from src.api.core.database import get_db_service
@@ -20,7 +21,7 @@ from src.api.core.ses_service import get_ses_service
 from src.api.core.exceptions import (
     AppError, BookingNotFoundError, BookingAlreadyCancelledError,
     SlotProcessingError, SlotTakenError, TooManyProcessingBookingsError,
-    InvalidBookingRequestError,
+    InvalidBookingRequestError, NoShowTooEarlyError,
 )
 from src.api.core.logging_config import get_logger
 
@@ -84,8 +85,16 @@ class CancelBookingRequest(BaseModel):
     reason, or send nothing at all and DEFAULT_CANCELLATION_REASON gets
     used instead. Kept optional (not required) since forcing a reason on
     every cancellation would just encourage typing throwaway text to get
-    past a required field, which defeats the point of collecting it."""
+    past a required field, which defeats the point of collecting it.
+
+    cancellation_type distinguishes WHO the cancellation is really about:
+    "emergency" (Debo's own side — sick, gym closed, unavailable) keeps
+    auto-refund eligibility and stays unrestricted by time. "no_show"
+    (the CLIENT didn't show up) never auto-refunds — that's on them, not
+    Debo — and can only be marked once the session has actually
+    concluded (see NoShowTooEarlyError)."""
     reason: Optional[str] = None
+    cancellation_type: Literal["emergency", "no_show"] = "emergency"
 
 
 def require_admin(credentials=Depends(bearer_scheme)):
@@ -124,11 +133,15 @@ def _item_to_response(item: dict) -> BookingResponse:
 
 def _is_past_visibility_window(item: dict) -> bool:
     """Explicit, computed-at-read-time check — see HISTORY_VISIBILITY_WINDOW
-    comment above for why this is a display filter, not a stored flag."""
-    session_start = datetime.strptime(
-        f"{item['session_date']}T{item['session_time']}", "%Y-%m-%dT%H:%M"
-    ).replace(tzinfo=timezone.utc)
-    return datetime.now(timezone.utc) - session_start > HISTORY_VISIBILITY_WINDOW
+    comment above for why this is a display filter, not a stored flag.
+
+    Anchored to the session's REAL end time (get_session_end_datetime),
+    not a fixed offset from start — a 2-hour Adult class needs the same
+    1-hour grace period AFTER it actually concludes, not 1 hour after it
+    starts (which would hide it from the admin list while the class is
+    still literally in progress)."""
+    session_end = get_session_end_datetime(item)
+    return datetime.now(timezone.utc) - session_end > HISTORY_VISIBILITY_WINDOW
 
 
 @router.post(
@@ -453,6 +466,23 @@ async def cancel_booking(booking_id: str, request: Optional[CancelBookingRequest
     # an admin submitting an empty string shouldn't produce a blank-looking
     # record; it should fall through to the same default as sending nothing.
     reason = (request.reason.strip() if request and request.reason else "") or DEFAULT_CANCELLATION_REASON
+    cancellation_type = request.cancellation_type if request else "emergency"
+
+    # No-show can only be marked once the session has actually concluded —
+    # checked BEFORE the atomic cancel(), using the real end time (type-
+    # specific duration, not a fixed assumption). This is a separate,
+    # additional business-rule check, not something that needs the same
+    # atomicity as the cancel itself — a genuine race between two admins
+    # cancelling the same booking simultaneously is still fully handled
+    # by cancel()'s own atomic conditional write regardless.
+    if cancellation_type == "no_show":
+        existing = _get_repository().get_by_id(booking_id)
+        if existing is None:
+            raise BookingNotFoundError(f"Booking {booking_id} not found")
+        if datetime.now(timezone.utc) < get_session_end_datetime(existing):
+            raise NoShowTooEarlyError(
+                "Can't mark this as a no-show until the session's scheduled time has passed."
+            )
 
     # Atomic cancel — see BookingRepository.cancel docstring for why this is
     # ONE conditional write rather than a separate check-then-update pair.
@@ -469,6 +499,33 @@ async def cancel_booking(booking_id: str, request: Optional[CancelBookingRequest
 
     item = result["item"]
 
+    # Auto-refund — ONLY for "emergency" cancellations (a no-show is the
+    # client's own fault, never auto-refunded — matches real business
+    # logic). Also requires this was a genuinely paid booking (receipt_url
+    # is only ever set by the webhook after a real charge succeeded — a
+    # proxy that survives here since `item` reflects the POST-cancel state,
+    # where status has already been overwritten to "cancelled") AND the
+    # session hasn't STARTED yet — once a session has begun, even an
+    # emergency cancellation no longer auto-refunds; Debo can still issue
+    # one manually via Stripe's dashboard if genuinely warranted. Full
+    # refunds only, tied directly to this same already-atomic, once-only
+    # cancel path — see refund_full_payment's docstring for why that makes
+    # this safe against double-refunds without needing separate tracking.
+    refund_info = None
+    if cancellation_type == "emergency" and item.get("receipt_url") and item.get("stripe_session_id"):
+        session_datetime = datetime.strptime(
+            f"{item['session_date']} {item['session_time']}", "%Y-%m-%d %H:%M"
+        ).replace(tzinfo=timezone.utc)
+        if datetime.now(timezone.utc) < session_datetime:
+            refund_info = get_stripe_service().refund_full_payment(item["stripe_session_id"])
+            if refund_info:
+                refund_info["receipt_url"] = item["receipt_url"]
+                logger.info("Auto-refund issued for booking %s: $%s", booking_id, refund_info["amount_usd"])
+            else:
+                logger.error(
+                    "Auto-refund FAILED for booking %s — needs manual refund in Stripe dashboard", booking_id
+                )
+
     # DELIBERATE BUSINESS DECISION — the slot claim is NOT released on
     # cancellation. If Debo manually cancels a Personal session, that's
     # almost always for a real reason (unavailable, emergency, etc.), and
@@ -477,16 +534,6 @@ async def cancel_booking(booking_id: str, request: Optional[CancelBookingRequest
     # specific calendar date+time that was cancelled — slot claims are keyed
     # by exact (date, time), not a recurring weekly pattern, so cancelling
     # Aug 10 at 10am has zero effect on future weeks' Mondays at 10am.
-    #
-    # Refunds are handled the same way, on purpose — manually, by Debo,
-    # directly in Stripe's own dashboard, NOT automated by this system.
-    # Automating real refunds correctly means handling partial refunds,
-    # preventing double-refunds, and listening for another webhook event
-    # (charge.refunded) — real complexity that isn't worth it at this
-    # scale (~20 clients/day). A human doing it in Stripe's already-safe,
-    # already-built refund UI is both less code and less risk than custom
-    # refund logic here. Revisit only if this ever becomes a much higher-
-    # volume storefront where manual refund handling stops scaling.
 
     # Two emails on successful cancellation — one to Debo confirming it
     # happened, one to the client notifying them. Only on the "cancelled"
@@ -495,7 +542,7 @@ async def cancel_booking(booking_id: str, request: Optional[CancelBookingRequest
     # (typed by Debo, or DEFAULT_CANCELLATION_REASON if he didn't provide
     # one) goes into both email bodies.
     ses = get_ses_service()
-    ses.send_cancellation_notice_to_client(item, reason)
+    ses.send_cancellation_notice_to_client(item, reason, refund_info=refund_info)
     ses.send_cancellation_notice_to_admin(item, reason, admin_email=os.environ["ADMIN_EMAIL"])
 
     logger.info("Booking %s cancelled by admin (reason: %s)", booking_id, reason)

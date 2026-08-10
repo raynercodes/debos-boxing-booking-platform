@@ -115,6 +115,17 @@ class InvalidBookingRequestError(AppError):
     exception to that pattern, and that inconsistency is what broke."""
 
 
+class NoShowTooEarlyError(AppError):
+    """422 — a booking can't be marked as a no-show until its session has
+    actually concluded (real end time, accounting for type-specific
+    duration — a 2-hour Adult class isn't over just because 1 hour has
+    passed). You genuinely can't know someone didn't show up for
+    something that hasn't happened yet. "Emergency" cancellations
+    (Debo's own side, e.g. he's sick or the gym is closed) remain
+    unrestricted by time — this restriction is specific to no-show
+    marking only."""
+
+
 class WebhookSignatureError(AppError):
     """400, not 401/403 — Stripe's own webhook documentation expects a 4xx
     on signature failure so it knows to stop retrying that specific event

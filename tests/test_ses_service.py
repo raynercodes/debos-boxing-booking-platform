@@ -51,6 +51,37 @@ def test_cancellation_notice_to_client_includes_reason():
     assert "Debo is sick today" in kwargs["Message"]["Body"]["Text"]["Data"]
 
 
+def test_cancellation_notice_to_client_includes_refund_info_when_provided():
+    service, mock_client = _service_with_mock_client()
+    refund_info = {
+        "amount_usd": 100.0,
+        "receipt_url": "https://pay.stripe.com/receipts/fake",
+    }
+    service.send_cancellation_notice_to_client(BOOKING, reason="Debo is sick today", refund_info=refund_info)
+
+    body = mock_client.send_email.call_args.kwargs["Message"]["Body"]["Text"]["Data"]
+    assert "$100.00" in body
+    assert "refund" in body.lower()
+    assert "5-10 business days" in body
+    assert "https://pay.stripe.com/receipts/fake" in body
+
+
+def test_cancellation_notice_to_client_omits_refund_section_when_none():
+    service, mock_client = _service_with_mock_client()
+    service.send_cancellation_notice_to_client(BOOKING, reason="Debo is sick today", refund_info=None)
+
+    body = mock_client.send_email.call_args.kwargs["Message"]["Body"]["Text"]["Data"]
+    assert "refund" not in body.lower()
+
+
+def test_booking_confirmation_includes_receipt_url_when_provided():
+    service, mock_client = _service_with_mock_client()
+    service.send_booking_confirmation(BOOKING, receipt_url="https://pay.stripe.com/receipts/fake")
+
+    body = mock_client.send_email.call_args.kwargs["Message"]["Body"]["Text"]["Data"]
+    assert "https://pay.stripe.com/receipts/fake" in body
+
+
 def test_cancellation_notice_to_admin_includes_reason():
     service, mock_client = _service_with_mock_client()
     service.send_cancellation_notice_to_admin(BOOKING, reason="Debo is sick today", admin_email="debo@example.com")

@@ -163,6 +163,61 @@ class StripeService:
         except stripe.error.StripeError as exc:
             logger.warning("Could not expire checkout session %s (likely already resolved): %s", session_id, exc)
 
+    def get_receipt_url(self, session_id: str) -> Optional[str]:
+        """Stripe already generates a clean, professional-looking hosted
+        receipt page for every real charge — no reason to build our own
+        receipt formatting from scratch when Stripe's is better and free.
+        This same URL stays useful after a refund too: Stripe's hosted
+        receipt page is dynamic, so viewing it after a refund shows
+        "Refunded" directly on the same page — meaning this one fetch,
+        done once at confirmation time and stored, covers both the
+        confirmation AND cancellation emails without needing a second,
+        separate "refund receipt" concept at all.
+
+        Returns None on any failure — a missing receipt link is a
+        cosmetic gap in the email, never worth failing the actual booking
+        confirmation over."""
+        stripe.api_key = self.api_key
+        try:
+            session = stripe.checkout.Session.retrieve(session_id, expand=["payment_intent.latest_charge"])
+            charge = session.payment_intent.latest_charge
+            return charge.receipt_url if charge else None
+        except (stripe.error.StripeError, AttributeError) as exc:
+            logger.warning("Could not fetch receipt URL for session %s: %s", session_id, exc)
+            return None
+
+    def refund_full_payment(self, session_id: str) -> Optional[dict]:
+        """Issues a FULL refund against the real charge tied to this
+        checkout session — deliberately full-only, not partial, keeping
+        this scoped to exactly what's needed rather than building
+        partial-refund logic nobody asked for.
+
+        Safe to call from the cancel endpoint specifically because that
+        endpoint's own cancel() is already atomic and only ever succeeds
+        ONCE per booking (see BookingRepository.cancel's docstring) — so
+        this can never be triggered twice for the same booking, no
+        separate double-refund tracking needed here.
+
+        Returns None on failure rather than raising — a failed refund
+        must never block the cancellation itself from completing. Debo's
+        intent to cancel is a separate concern from whether the refund
+        technically succeeded; a failure here gets logged clearly so it's
+        visible for manual follow-up, but the booking still gets
+        cancelled regardless."""
+        stripe.api_key = self.api_key
+        try:
+            session = stripe.checkout.Session.retrieve(session_id)
+            payment_intent_id = session.payment_intent
+            if not payment_intent_id:
+                logger.warning("No payment_intent on session %s — nothing to refund", session_id)
+                return None
+            refund = stripe.Refund.create(payment_intent=payment_intent_id)
+            logger.info("Refund %s issued for session %s: $%s", refund.id, session_id, refund.amount / 100)
+            return {"refund_id": refund.id, "amount_usd": refund.amount / 100, "status": refund.status}
+        except stripe.error.StripeError as exc:
+            logger.error("Refund FAILED for session %s — needs manual follow-up: %s", session_id, exc, exc_info=True)
+            return None
+
 
 _stripe_service: Optional[StripeService] = None
 

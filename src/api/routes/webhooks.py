@@ -69,13 +69,25 @@ async def stripe_webhook(request: Request):
         if requires_slot_claim(BookingType(booking["booking_type"])):
             repo.confirm_slot(booking["session_date"], booking["session_time"])
 
+        # Fetched once, right here, and stored — this same link gets reused
+        # later in the cancellation email too if a refund is ever issued
+        # against it, since Stripe's hosted receipt page is dynamic and
+        # reflects refund status automatically. Never blocks confirmation
+        # on failure — get_receipt_url() returns None rather than raising.
+        stripe_session_id = booking.get("stripe_session_id")
+        receipt_url = None
+        if stripe_session_id:
+            receipt_url = get_stripe_service().get_receipt_url(stripe_session_id)
+            if receipt_url:
+                repo.set_receipt_url(booking_id, receipt_url)
+
         # This is the ONLY point a booking is actually verified-paid, so
         # it's the correct place for confirmation emails to originate from.
         # booking dict here is the PRE-update snapshot (status still says
         # "processing" in memory) — fine, since neither email body
         # references the status field, only name/date/time/price.
         ses = get_ses_service()
-        ses.send_booking_confirmation(booking)
+        ses.send_booking_confirmation(booking, receipt_url=receipt_url)
         ses.send_new_booking_notification(booking, admin_email=os.environ["ADMIN_EMAIL"])
 
         logger.info("Booking %s confirmed via Stripe webhook", booking_id)

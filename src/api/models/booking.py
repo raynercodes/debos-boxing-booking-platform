@@ -1,5 +1,6 @@
 import re
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from enum import Enum
 from typing import ClassVar, Dict, Set, Tuple, Optional
 
@@ -110,6 +111,39 @@ BOOKING_TYPE_RULES: Dict[BookingType, dict] = {
 }
 
 
+GYM_TIMEZONE = ZoneInfo("America/New_York")
+
+
+def parse_session_datetime_utc(session_date: str, session_time: str) -> datetime:
+    """Single source of truth for converting a stored (session_date,
+    session_time) pair into a real, comparable UTC instant.
+
+    Session times are always Eastern local time — the gym is a real,
+    physical, in-person business in Georgia, not a worldwide virtual
+    service, so hardcoding one timezone here is the correct model, not
+    genuine per-customer timezone detection (real, unwarranted
+    complexity for a business that's inherently local — even the
+    "virtual" personal training option is scheduled around Debo's own
+    Eastern availability, not wherever a customer happens to be browsing
+    from).
+
+    Uses zoneinfo's America/New_York specifically, not a fixed UTC
+    offset — this correctly handles the EDT/EST daylight-saving
+    transition automatically, twice a year. A fixed offset would
+    silently drift an hour wrong for half the year.
+
+    Bug this fixes: every earlier version of this comparison did
+    `.replace(tzinfo=timezone.utc)` directly on the naive parsed time —
+    treating "17:00" (5 PM Eastern) as if it were already 17:00 UTC,
+    rather than converting it. Since Eastern is UTC-4 in summer, this
+    made anything after roughly 1 PM Eastern look like it had "already
+    happened" by UTC's clock, incorrectly rejecting same-day bookings
+    for sessions still genuinely hours in the future."""
+    local_naive = datetime.strptime(f"{session_date} {session_time}", "%Y-%m-%d %H:%M")
+    local_aware = local_naive.replace(tzinfo=GYM_TIMEZONE)
+    return local_aware.astimezone(timezone.utc)
+
+
 def get_session_end_datetime(item: dict) -> datetime:
     """The single source of truth for "when does this session actually
     end" — accounts for each type's real duration instead of assuming a
@@ -121,9 +155,7 @@ def get_session_end_datetime(item: dict) -> datetime:
     session concluded" needs a real, correct answer, not everywhere
     "session start time" is asked instead — those are different
     questions with different correct implementations."""
-    start = datetime.strptime(
-        f"{item['session_date']} {item['session_time']}", "%Y-%m-%d %H:%M"
-    ).replace(tzinfo=timezone.utc)
+    start = parse_session_datetime_utc(item["session_date"], item["session_time"])
     duration_hours = BOOKING_TYPE_RULES[BookingType(item["booking_type"])]["duration_hours"]
     return start + timedelta(hours=duration_hours)
 

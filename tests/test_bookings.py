@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import pytest
 from fastapi.testclient import TestClient
@@ -8,6 +9,23 @@ from src.api.routes.bookings import get_client_ip
 from src.api.models.booking import BOOKING_TYPE_RULES, BookingType, AVAILABLE_TIMES_BY_TYPE
 
 client = TestClient(app)
+
+GYM_TIMEZONE = ZoneInfo("America/New_York")
+
+
+def _session_date_time_offset_from_now(hours: float) -> tuple:
+    """Builds a (session_date, session_time) pair representing exactly
+    `hours` from right now, correctly accounting for Eastern time - the
+    same real-world interpretation parse_session_datetime_utc uses in the
+    actual application code. Naive UTC arithmetic (computing "N hours
+    ago" purely in UTC, then feeding the resulting HH:MM into an API that
+    interprets it as Eastern) silently represents a DIFFERENT real-world
+    moment than intended, off by the UTC-Eastern offset - exactly the
+    class of bug this whole timezone fix addresses, so tests need to
+    share the same correct model, not their own separate naive one."""
+    target_utc = datetime.now(timezone.utc) + timedelta(hours=hours)
+    target_local = target_utc.astimezone(GYM_TIMEZONE)
+    return target_local.date().isoformat(), target_local.strftime("%H:%M")
 
 
 def _find_valid_date_and_time(booking_type: BookingType) -> tuple:
@@ -282,13 +300,19 @@ def test_create_booking_same_day_past_time_rejected(mock_aws_infra):
     past-date check compared DATE only, missing the same-day case entirely
     — booking TODAY's date for a time slot that's already passed (e.g.
     requesting 8:00 AM at 4:25 PM the same day) was incorrectly accepted,
-    since the date itself technically wasn't "in the past" yet. Fixed by
-    combining date+time into one real instant, matching the same pattern
-    already used correctly in the refund-eligibility check."""
-    now = datetime.now(timezone.utc)
+    since the date itself technically wasn't "in the past" yet.
+
+    A SECOND, deeper bug was found right after fixing the first: session
+    times are Eastern local time, not UTC — treating "17:00" as 17:00 UTC
+    directly (instead of converting from Eastern) made anything after
+    ~1PM Eastern look "already past" by UTC's clock, incorrectly
+    REJECTING valid same-day future bookings. Both are fixed by
+    parse_session_datetime_utc, which this test now correctly targets
+    using the same Eastern-aware helper the application code uses."""
+    date, time = _session_date_time_offset_from_now(hours=-1)
     payload = _booking_payload(BookingType.genes_kids)
-    payload["session_date"] = now.date().isoformat()
-    payload["session_time"] = (now - timedelta(hours=1)).strftime("%H:%M")
+    payload["session_date"] = date
+    payload["session_time"] = time
     response = client.post("/bookings", json=payload)
     assert response.status_code == 422
     assert "past" in response.json()["detail"].lower()
@@ -296,18 +320,46 @@ def test_create_booking_same_day_past_time_rejected(mock_aws_infra):
 
 def test_create_booking_same_day_future_time_accepted(mock_aws_infra, mock_stripe_checkout):
     """Confirms the fix isn't overcorrected — today's date with a time
-    still ahead of the current moment must still succeed. Uses
-    _find_valid_date_and_time's own already-safe date+time pair directly
-    rather than overriding session_date independently, since overriding
-    just the date while keeping a time computed for a DIFFERENT date is
-    exactly the kind of mismatch that caused the original bug."""
+    still genuinely ahead of the current moment must still succeed."""
     from src.api.models.booking import BOOKING_TYPE_RULES, BookingType as BT
 
-    payload = _booking_payload(BT.genes_kids)
-    now = datetime.now(timezone.utc)
-    if payload["session_date"] != now.date().isoformat():
-        pytest.skip("Helper chose a future day, not today, for the current time of day - nothing to test right now")
+    date, time = _session_date_time_offset_from_now(hours=2)
+    for bt in [BT.genes_kids, BT.genes_adult, BT.personal_client_travels]:
+        candidate_weekday = datetime.strptime(date, "%Y-%m-%d").weekday()
+        if candidate_weekday in BOOKING_TYPE_RULES[bt]["allowed_weekdays"]:
+            valid_type = bt
+            break
+    else:
+        pytest.skip("No booking type allows this weekday - nothing to test right now")
 
+    payload = _booking_payload(valid_type)
+    payload["session_date"] = date
+    payload["session_time"] = time
+    response = client.post("/bookings", json=payload)
+    assert response.status_code == 201
+
+
+def test_create_booking_a_few_minutes_from_now_accepted(mock_aws_infra, mock_stripe_checkout):
+    """Directly mirrors the exact real-world report: at 4:56 PM Eastern,
+    booking a 5:00 PM session was incorrectly rejected as "in the past" —
+    because the old code treated "17:00" as 17:00 UTC directly, and
+    Eastern is UTC-4, making anything past ~1PM Eastern look like it had
+    already happened by UTC's clock. A session only minutes away, in real
+    Eastern wall-clock terms, must be accepted."""
+    from src.api.models.booking import BOOKING_TYPE_RULES, BookingType as BT
+
+    date, time = _session_date_time_offset_from_now(hours=0.07)  # ~4 minutes
+    for bt in [BT.genes_kids, BT.genes_adult, BT.personal_client_travels]:
+        candidate_weekday = datetime.strptime(date, "%Y-%m-%d").weekday()
+        if candidate_weekday in BOOKING_TYPE_RULES[bt]["allowed_weekdays"]:
+            valid_type = bt
+            break
+    else:
+        pytest.skip("No booking type allows this weekday - nothing to test right now")
+
+    payload = _booking_payload(valid_type)
+    payload["session_date"] = date
+    payload["session_time"] = time
     response = client.post("/bookings", json=payload)
     assert response.status_code == 201
 
@@ -817,12 +869,12 @@ def test_no_show_after_session_end_succeeds_without_refund(mock_aws_infra, admin
     from src.api.core.bookings_repository import BookingRepository
     from src.api.core.database import get_db_service
 
-    past = datetime.now(timezone.utc) - timedelta(hours=3)
+    date, time = _session_date_time_offset_from_now(hours=-3)
     repo = BookingRepository(get_db_service())
     item = {
         "booking_id": "real-no-show",
         "name": "Ghost Client", "email": "ghost@example.com", "phone": "4045551234",
-        "session_date": past.date().isoformat(), "session_time": past.strftime("%H:%M"),
+        "session_date": date, "session_time": time,
         "booking_type": "genes_kids", "location": "genes", "session_detail": "kids",
         "price_usd": 90, "status": "confirmed",
         "stripe_session_id": "cs_test_no_show", "receipt_url": "https://pay.stripe.com/receipts/fake",
@@ -918,11 +970,11 @@ def test_history_visibility_filter_excludes_past_bookings(mock_aws_infra, admin_
     from src.api.core.database import get_db_service
 
     repo = BookingRepository(get_db_service())
-    past_moment = datetime.now(timezone.utc) - timedelta(hours=4)
+    date, time = _session_date_time_offset_from_now(hours=-4)
     past_item = {
         "booking_id": "past-visibility-test-id",
         "name": "Past Client", "email": "past@example.com", "phone": "4045551234",
-        "session_date": past_moment.date().isoformat(), "session_time": past_moment.strftime("%H:%M"),
+        "session_date": date, "session_time": time,
         "booking_type": "genes_kids", "location": "genes", "session_detail": "kids",
         "price_usd": 90, "status": "confirmed",
         "created_at": datetime.now(timezone.utc).isoformat(), "reminder_sent": False,

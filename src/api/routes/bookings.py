@@ -11,7 +11,7 @@ from src.api.models.booking import (
     BookingRequest, BookingResponse, BookingCheckoutResponse, BookingStatus,
     BOOKING_TYPE_RULES, CHECKOUT_SESSION_EXPIRY_MINUTES, AVAILABLE_TIMES_BY_TYPE,
     BOOKING_TYPE_DISPLAY_NAMES, LOCATION_DETAIL_TO_BOOKING_TYPE, requires_slot_claim,
-    get_session_end_datetime,
+    get_session_end_datetime, parse_session_datetime_utc,
 )
 from src.api.core.security import get_security_service
 from src.api.core.database import get_db_service
@@ -204,13 +204,14 @@ async def create_booking(
     # that's already passed (e.g. requesting 8:00 AM at 4:25 PM the same
     # day) was incorrectly accepted, since the date itself technically
     # wasn't "in the past" yet. Combining date+time into one real instant
-    # and comparing against the actual current moment — matching the same
-    # pattern already used correctly in the refund-eligibility check —
-    # closes that gap properly.
-    session_datetime_parsed = datetime.strptime(
-        f"{request.session_date} {request.session_time}", "%Y-%m-%d %H:%M"
-    ).replace(tzinfo=timezone.utc)
-    if session_datetime_parsed < datetime.now(timezone.utc):
+    # via the shared parse_session_datetime_utc helper — which ALSO fixes
+    # a second, deeper bug: session_time is Eastern local time, not UTC.
+    # Treating "17:00" as 17:00 UTC directly (rather than converting from
+    # Eastern) meant anything after ~1PM Eastern looked "already past" by
+    # UTC's clock, incorrectly rejecting same-day bookings still hours
+    # away in reality.
+    session_datetime_utc = parse_session_datetime_utc(request.session_date, request.session_time)
+    if session_datetime_utc < datetime.now(timezone.utc):
         raise InvalidBookingRequestError("Session time can't be in the past.")
 
     allowed_weekdays = BOOKING_TYPE_RULES[booking_type]["allowed_weekdays"]
@@ -540,10 +541,12 @@ async def cancel_booking(booking_id: str, request: Optional[CancelBookingRequest
     # this safe against double-refunds without needing separate tracking.
     refund_info = None
     if cancellation_type == "emergency" and item.get("receipt_url") and item.get("stripe_session_id"):
-        session_datetime = datetime.strptime(
-            f"{item['session_date']} {item['session_time']}", "%Y-%m-%d %H:%M"
-        ).replace(tzinfo=timezone.utc)
-        if datetime.now(timezone.utc) < session_datetime:
+        # Same shared helper, same reason - session_time is Eastern local,
+        # not UTC. The old inline version here treated it as UTC directly,
+        # which would have made this refund-eligibility window wrong by
+        # several hours depending on time of day.
+        session_datetime_utc = parse_session_datetime_utc(item["session_date"], item["session_time"])
+        if datetime.now(timezone.utc) < session_datetime_utc:
             refund_info = get_stripe_service().refund_full_payment(item["stripe_session_id"])
             if refund_info:
                 refund_info["receipt_url"] = item["receipt_url"]

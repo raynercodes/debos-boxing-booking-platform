@@ -256,6 +256,19 @@ def test_create_booking_wrong_weekday_for_valid_combo_rejected(mock_aws_infra):
     assert "genes_kids" not in response.json()["detail"]  # raw enum value should never leak to the customer
 
 
+def test_create_booking_past_date_rejected(mock_aws_infra):
+    """Nothing server-side previously rejected a past date - only the
+    frontend's date picker did, which is trivially bypassed by calling
+    the API directly. Found in production: a real booking got created
+    and PAID for with a session_date already in the past, invisible to
+    the admin's normal list (which never queries backward in time)."""
+    payload = _booking_payload(BookingType.genes_kids)
+    payload["session_date"] = (datetime.now(timezone.utc).date() - timedelta(days=2)).isoformat()
+    response = client.post("/bookings", json=payload)
+    assert response.status_code == 422
+    assert "past" in response.json()["detail"].lower()
+
+
 def test_create_personal_virtual_booking_priced_correctly(mock_aws_infra, mock_stripe_checkout):
     """The new Zoom option — confirmed $40, matching client_travels pricing
     (Debo reasoned no gas cost either way)."""

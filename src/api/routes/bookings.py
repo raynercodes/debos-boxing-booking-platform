@@ -188,6 +188,19 @@ async def create_booking(
     booking_type = request.booking_type  # safe now — combo is confirmed valid above
 
     session_date_parsed = datetime.strptime(request.session_date, "%Y-%m-%d")
+
+    # Genuine gap found in production: nothing server-side ever rejected a
+    # PAST date. The frontend's date picker has a min={today} attribute,
+    # but that's purely client-side UI — trivially bypassed by anyone
+    # calling the API directly, same "never trust client-side as the only
+    # enforcement" principle already applied to weekday/combo validation
+    # below. Without this, Stripe would happily charge someone for a
+    # session dated yesterday — real money for something nobody can ever
+    # attend, and invisible to the admin's normal 7-day list window since
+    # nothing queries backward in time by default.
+    if session_date_parsed.date() < datetime.now(timezone.utc).date():
+        raise InvalidBookingRequestError("Session date can't be in the past.")
+
     allowed_weekdays = BOOKING_TYPE_RULES[booking_type]["allowed_weekdays"]
     if session_date_parsed.weekday() not in allowed_weekdays:
         weekday_names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]

@@ -98,19 +98,6 @@ Globals:
         ADMIN_EMAIL: !Ref AdminEmail
         FRONTEND_BASE_URL: !Ref FrontendBaseUrl
         LOG_LEVEL: "INFO"
-        # Deliberately forces a real diff on the Environment property
-        # itself, not some unrelated property - CloudFormation does
-        # targeted, per-property updates, not a full resource rewrite
-        # whenever ANYTHING changes. Adding Tags earlier changed Tags
-        # specifically, so CloudFormation only touched Tags - it never
-        # recognized Environment itself as different (template-to-
-        # template comparison, not template-to-live-resource), so the
-        # actual drifted/wiped live variables were never corrected. This
-        # marker guarantees every function's Environment genuinely
-        # differs from what's tracked, forcing a real, full rewrite that
-        # restores everything correctly. Safe to remove once confirmed
-        # fixed - it's not meaningful config, just a forcing mechanism.
-        DRIFT_CORRECTION_MARKER: "1"
 
 Resources:
 

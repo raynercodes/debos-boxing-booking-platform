@@ -11,13 +11,25 @@ from datetime import datetime, timedelta, timezone
 from src.api.core.database import get_db_service
 from src.api.core.bookings_repository import BookingRepository
 from src.api.core.ses_service import get_ses_service
+from src.api.models.booking import GYM_TIMEZONE
 from src.api.core.logging_config import get_logger
 
 logger = get_logger(__name__)
 
 
 def handler(event, context):
-    tomorrow_date = (datetime.now(timezone.utc) + timedelta(days=1)).date().isoformat()
+    # "Tomorrow" is computed from Eastern's calendar day, not UTC's - the
+    # EventBridge rate(1 day) schedule fires at whatever UTC time-of-day
+    # the rule happened to be created at, not something explicitly chosen
+    # relative to Eastern. If it fires anywhere within the UTC/Eastern
+    # day-boundary skew window, computing "tomorrow" from UTC's date
+    # could silently pick the wrong calendar day - sending reminders a
+    # day early or late relative to what Debo's business actually
+    # considers "tomorrow." Same GYM_TIMEZONE used everywhere else a
+    # session_date needs to mean something to a real person, not a
+    # server's internal clock.
+    now_eastern = datetime.now(timezone.utc).astimezone(GYM_TIMEZONE)
+    tomorrow_date = (now_eastern + timedelta(days=1)).date().isoformat()
     logger.info("Reminder job triggered for date: %s", tomorrow_date)
 
     repo = BookingRepository(get_db_service())

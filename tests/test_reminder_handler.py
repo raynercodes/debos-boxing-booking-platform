@@ -3,10 +3,16 @@ from datetime import datetime, timedelta, timezone
 from src.scheduled.reminder_handler import handler
 from src.api.core.bookings_repository import BookingRepository
 from src.api.core.database import get_db_service
+from src.api.models.booking import GYM_TIMEZONE
 
 
 def _tomorrow() -> str:
-    return (datetime.now(timezone.utc) + timedelta(days=1)).date().isoformat()
+    """Matches the handler's own corrected logic - "tomorrow" is Eastern's
+    calendar day, not UTC's. Using the same naive UTC computation the old
+    buggy handler used would make this test flaky depending on time of
+    day, same class of bug as elsewhere in this project."""
+    now_eastern = datetime.now(timezone.utc).astimezone(GYM_TIMEZONE)
+    return (now_eastern + timedelta(days=1)).date().isoformat()
 
 
 def _base_item(booking_id: str, **overrides) -> dict:

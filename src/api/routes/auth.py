@@ -5,7 +5,7 @@ from pydantic import BaseModel
 
 from src.api.core.security import get_security_service
 from src.api.core.lockout import LockoutManager
-from src.api.core.ip_blocklist import IPBlocklist
+from src.api.core.ip_blocklist import IPBlocklist, FailedLoginTracker
 from src.api.core.database import get_db_service
 from src.api.core.exceptions import InvalidCredentialsError, IPBlockedError
 from src.api.core.logging_config import get_logger
@@ -73,13 +73,15 @@ async def admin_login(request: AdminLoginRequest, client_ip: str = Depends(get_c
     # reaches the client response, only the log line. Never log the actual
     # password value itself, only that an attempt happened.
     if request.email.lower() != admin_email.lower():
-        logger.warning("Failed login attempt — unrecognized email: %s", request.email)
+        logger.warning("Failed login attempt from IP %s — unrecognized email: %s", client_ip, request.email)
         lockout.record_failed_attempt(client_ip)
+        FailedLoginTracker(get_db_service()).record_attempt(client_ip)
         raise InvalidCredentialsError("Invalid credentials")
 
     if not security.verify_password(request.password, security.admin_password_hash):
-        logger.warning("Failed login attempt — wrong password for admin email")
+        logger.warning("Failed login attempt from IP %s — wrong password for admin email", client_ip)
         lockout.record_failed_attempt(client_ip)
+        FailedLoginTracker(get_db_service()).record_attempt(client_ip)
         raise InvalidCredentialsError("Invalid credentials")
 
     logger.info("Admin login successful")
@@ -100,6 +102,27 @@ class BlockedIPResponse(BaseModel):
 async def list_blocked_ips():
     blocklist = IPBlocklist(get_db_service())
     return BlockedIPResponse(blocked_ips=blocklist.list_blocked())
+
+
+class FailedAttemptEntry(BaseModel):
+    ip: str
+    attempt_count: int
+    last_attempt_at: str | None = None
+
+
+@router.get(
+    "/failed-login-attempts",
+    response_model=list[FailedAttemptEntry],
+    summary="List Failed Login Attempts by IP (Admin)",
+    description="Sorted by attempt count, highest first — quick visibility "
+                "into which IPs have actually been failing, without digging "
+                "through raw CloudWatch logs, so you know who's worth "
+                "blocking before it escalates to the 3rd-lockout alert.",
+    dependencies=[Depends(require_admin)],
+)
+async def list_failed_login_attempts():
+    tracker = FailedLoginTracker(get_db_service())
+    return tracker.list_recent()
 
 
 @router.post(

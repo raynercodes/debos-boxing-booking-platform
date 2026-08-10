@@ -228,3 +228,28 @@ def test_first_and_second_lockout_do_not_trigger_alert(mock_aws_infra):
         lockout.record_failed_attempt(client_ip="192.0.2.60")
 
     mock_client.send_email.assert_not_called()
+
+
+def test_failed_login_records_ip_and_visible_via_admin_endpoint(mock_aws_infra, admin_token):
+    """A failed login attempt should be trackable per-IP, so an admin can
+    see who's actually been failing without digging through raw
+    CloudWatch logs one line at a time."""
+    from src.api.main import app as main_app
+    from src.api.routes.auth import get_client_ip
+
+    main_app.dependency_overrides[get_client_ip] = lambda: "198.51.100.77"
+    client.post("/auth/login", json={"email": "wrong@example.com", "password": "wrong"})
+    client.post("/auth/login", json={"email": "wrong@example.com", "password": "wrong"})
+    main_app.dependency_overrides.clear()
+
+    response = client.get("/auth/failed-login-attempts", headers={"Authorization": f"Bearer {admin_token}"})
+    assert response.status_code == 200
+    entries = response.json()
+    matching = [e for e in entries if e["ip"] == "198.51.100.77"]
+    assert len(matching) == 1
+    assert matching[0]["attempt_count"] == 2
+
+
+def test_failed_login_attempts_endpoint_requires_admin(mock_aws_infra):
+    response = client.get("/auth/failed-login-attempts")
+    assert response.status_code in (401, 403)

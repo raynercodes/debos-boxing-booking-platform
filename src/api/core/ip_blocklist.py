@@ -15,6 +15,7 @@ easily-justified upgrade at that point, not before.
 """
 
 from botocore.exceptions import ClientError, BotoCoreError
+from datetime import datetime, timezone
 
 from src.api.core.database import DynamoDBService
 from src.api.core.logging_config import get_logger
@@ -83,3 +84,52 @@ class IPBlocklist:
         if not item:
             return []
         return sorted(item.get("blocked_ips", set()))
+
+
+class FailedLoginTracker:
+    """Per-IP failed-attempt counts, separate from LockoutManager's
+    global lockout state and the brute-force alert email (which only
+    fires at the 3rd separate lockout). This exists purely for quick
+    visibility — "which IPs have actually been failing, and how many
+    times" — so an admin can decide who to block without digging through
+    raw CloudWatch logs one line at a time. A scan is used to list all
+    tracked IPs, deliberately — this is a rare, admin-only lookup action,
+    not something on the request-critical login path itself, matching
+    the same reasoning already applied to the leads-follow-up feature."""
+
+    KEY_PREFIX = "failed_login_ip:"
+
+    def __init__(self, db_service: DynamoDBService) -> None:
+        self._db = db_service
+
+    def record_attempt(self, ip: str) -> None:
+        try:
+            self._db.security_table.update_item(
+                Key={"security_key": f"{self.KEY_PREFIX}{ip}"},
+                UpdateExpression="ADD attempt_count :one SET last_attempt_at = :now",
+                ExpressionAttributeValues={":one": 1, ":now": datetime.now(timezone.utc).isoformat()},
+            )
+        except (ClientError, BotoCoreError) as exc:
+            # Deliberately never raises — a tracking failure must not
+            # block the actual login rejection from completing.
+            logger.error("Failed to record failed-attempt tracking for IP %s: %s", ip, exc, exc_info=True)
+
+    def list_recent(self) -> list:
+        try:
+            response = self._db.security_table.scan(
+                FilterExpression="begins_with(security_key, :prefix)",
+                ExpressionAttributeValues={":prefix": self.KEY_PREFIX},
+            )
+        except (ClientError, BotoCoreError) as exc:
+            logger.error("Failed to list failed-login attempts: %s", exc, exc_info=True)
+            raise
+        items = response.get("Items", [])
+        results = [
+            {
+                "ip": item["security_key"][len(self.KEY_PREFIX):],
+                "attempt_count": int(item.get("attempt_count", 0)),
+                "last_attempt_at": item.get("last_attempt_at"),
+            }
+            for item in items
+        ]
+        return sorted(results, key=lambda r: r["attempt_count"], reverse=True)

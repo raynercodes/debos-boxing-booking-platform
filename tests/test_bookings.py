@@ -176,10 +176,11 @@ def test_different_ips_not_blocked_by_each_other(mock_aws_infra, mock_stripe_che
     assert second.status_code == 201
 
 
-def test_cancel_checkout_expires_session_and_returns_html(mock_aws_infra, mock_stripe_checkout):
+def test_cancel_checkout_expires_session_and_redirects(mock_aws_infra, mock_stripe_checkout):
     """The recovery path for Stripe's own cancel/back link — force-expires
     the real Stripe session rather than leaving the booking stranded for
-    the full 30-minute natural expiry."""
+    the full 30-minute natural expiry, THEN redirects to a real,
+    on-brand Framer page instead of returning plain HTML directly."""
     from unittest.mock import patch
 
     app.dependency_overrides[get_client_ip] = lambda: "203.0.113.30"
@@ -188,17 +189,21 @@ def test_cancel_checkout_expires_session_and_returns_html(mock_aws_infra, mock_s
     booking_id = created.json()["booking_id"]
 
     with patch("stripe.checkout.Session.expire") as mock_expire:
-        response = client.get(f"/bookings/{booking_id}/cancel-checkout")
+        # follow_redirects=False - otherwise the test client would try to
+        # actually fetch the real external Framer domain, which doesn't
+        # exist in a test environment. We're testing the REDIRECT itself,
+        # not whatever page it points at.
+        response = client.get(f"/bookings/{booking_id}/cancel-checkout", follow_redirects=False)
 
-    assert response.status_code == 200
-    assert "cancelled" in response.text.lower()
+    assert response.status_code == 302
+    assert "booking-cancelled" in response.headers["location"]
     mock_expire.assert_called_once()
 
 
 def test_cancel_checkout_is_idempotent_for_already_resolved_booking(mock_aws_infra, mock_stripe_checkout):
     """Reloading the cancel page, or clicking an old link after the
     booking already resolved (confirmed, expired, or already cancelled),
-    should show a clean message — never a confusing error."""
+    should redirect to the same page — never a confusing error."""
     from src.api.core.bookings_repository import BookingRepository
     from src.api.core.database import get_db_service
 
@@ -210,14 +215,17 @@ def test_cancel_checkout_is_idempotent_for_already_resolved_booking(mock_aws_inf
     repo = BookingRepository(get_db_service())
     repo.set_status(booking_id, "confirmed")
 
-    response = client.get(f"/bookings/{booking_id}/cancel-checkout")
-    assert response.status_code == 200
-    assert "already been resolved" in response.text.lower()
+    response = client.get(f"/bookings/{booking_id}/cancel-checkout", follow_redirects=False)
+    assert response.status_code == 302
+    assert "booking-cancelled" in response.headers["location"]
 
 
-def test_cancel_checkout_unknown_booking_returns_404(mock_aws_infra):
-    response = client.get("/bookings/not-a-real-id/cancel-checkout")
-    assert response.status_code == 404
+def test_cancel_checkout_unknown_booking_redirects_too(mock_aws_infra):
+    """Even an unknown booking_id redirects to the same page - no reason
+    to expose a bare 404 to a customer clicking a real Stripe link."""
+    response = client.get("/bookings/not-a-real-id/cancel-checkout", follow_redirects=False)
+    assert response.status_code == 302
+    assert "booking-cancelled" in response.headers["location"]
 
 
 def test_create_booking_invalid_location_detail_combo(mock_aws_infra):

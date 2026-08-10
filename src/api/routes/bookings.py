@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime, timezone, timedelta
 from typing import Optional, List, Literal
 from fastapi import APIRouter, Depends, Query, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import RedirectResponse
 from fastapi.security import HTTPBearer
 from pydantic import BaseModel
 
@@ -434,25 +434,30 @@ async def get_booking(booking_id: str):
                 "Stripe session immediately (same real webhook path as "
                 "natural 30-minute expiry) rather than leaving the slot "
                 "claim reserved for no reason once we already know they're "
-                "not paying. Returns plain HTML directly since this is a "
-                "browser redirect target, not a JSON API call from code — "
-                "no Framer page needs to exist yet for this to work.",
+                "not paying, then redirects to a real, on-brand Framer "
+                "confirmation page — this endpoint does the real work, the "
+                "customer never actually sees it directly.",
 )
 async def cancel_checkout(booking_id: str):
     repo = _get_repository()
     item = repo.get_by_id(booking_id)
 
+    # Redirects to a real, on-brand Framer page (same pattern as the
+    # success flow's booking-confirmed page) instead of returning plain
+    # HTML directly. The FUNCTIONAL work below (force-expiring the Stripe
+    # session, releasing the slot claim immediately rather than waiting
+    # the full 30-minute natural expiry) stays exactly as it was — only
+    # what the customer actually SEES changes here.
+    cancelled_page_url = f"{os.environ.get('FRONTEND_BASE_URL', 'https://debosboxingandfitness.com')}/booking-cancelled"
+
     if item is None:
-        return HTMLResponse("<h1>Booking not found</h1>", status_code=404)
+        return RedirectResponse(url=cancelled_page_url, status_code=302)
 
     if item["status"] != BookingStatus.processing.value:
         # Idempotent-safe — someone reloading this page, or clicking an
         # old link after the booking already resolved one way or another,
-        # shouldn't see a confusing error.
-        return HTMLResponse(
-            "<h1>This booking has already been resolved.</h1>"
-            "<p>No further action needed.</p>"
-        )
+        # shouldn't see a confusing error, just land on the same page.
+        return RedirectResponse(url=cancelled_page_url, status_code=302)
 
     session_id = item.get("stripe_session_id")
     if session_id:
@@ -460,10 +465,7 @@ async def cancel_checkout(booking_id: str):
 
     logger.info("Checkout explicitly cancelled by customer for booking %s", booking_id)
 
-    return HTMLResponse(
-        "<h1>Booking cancelled</h1>"
-        "<p>No charge was made. Feel free to book another session anytime.</p>"
-    )
+    return RedirectResponse(url=cancelled_page_url, status_code=302)
 
 
 @router.patch(

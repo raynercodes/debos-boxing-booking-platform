@@ -198,8 +198,20 @@ async def create_booking(
     # session dated yesterday — real money for something nobody can ever
     # attend, and invisible to the admin's normal 7-day list window since
     # nothing queries backward in time by default.
-    if session_date_parsed.date() < datetime.now(timezone.utc).date():
-        raise InvalidBookingRequestError("Session date can't be in the past.")
+    #
+    # Real gap in an earlier version of this check: comparing DATE only
+    # missed the same-day case — booking today's date for a TIME slot
+    # that's already passed (e.g. requesting 8:00 AM at 4:25 PM the same
+    # day) was incorrectly accepted, since the date itself technically
+    # wasn't "in the past" yet. Combining date+time into one real instant
+    # and comparing against the actual current moment — matching the same
+    # pattern already used correctly in the refund-eligibility check —
+    # closes that gap properly.
+    session_datetime_parsed = datetime.strptime(
+        f"{request.session_date} {request.session_time}", "%Y-%m-%d %H:%M"
+    ).replace(tzinfo=timezone.utc)
+    if session_datetime_parsed < datetime.now(timezone.utc):
+        raise InvalidBookingRequestError("Session time can't be in the past.")
 
     allowed_weekdays = BOOKING_TYPE_RULES[booking_type]["allowed_weekdays"]
     if session_date_parsed.weekday() not in allowed_weekdays:

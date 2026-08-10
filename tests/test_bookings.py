@@ -277,6 +277,41 @@ def test_create_booking_past_date_rejected(mock_aws_infra):
     assert "past" in response.json()["detail"].lower()
 
 
+def test_create_booking_same_day_past_time_rejected(mock_aws_infra):
+    """The exact real bug found in production: my first version of the
+    past-date check compared DATE only, missing the same-day case entirely
+    — booking TODAY's date for a time slot that's already passed (e.g.
+    requesting 8:00 AM at 4:25 PM the same day) was incorrectly accepted,
+    since the date itself technically wasn't "in the past" yet. Fixed by
+    combining date+time into one real instant, matching the same pattern
+    already used correctly in the refund-eligibility check."""
+    now = datetime.now(timezone.utc)
+    payload = _booking_payload(BookingType.genes_kids)
+    payload["session_date"] = now.date().isoformat()
+    payload["session_time"] = (now - timedelta(hours=1)).strftime("%H:%M")
+    response = client.post("/bookings", json=payload)
+    assert response.status_code == 422
+    assert "past" in response.json()["detail"].lower()
+
+
+def test_create_booking_same_day_future_time_accepted(mock_aws_infra, mock_stripe_checkout):
+    """Confirms the fix isn't overcorrected — today's date with a time
+    still ahead of the current moment must still succeed. Uses
+    _find_valid_date_and_time's own already-safe date+time pair directly
+    rather than overriding session_date independently, since overriding
+    just the date while keeping a time computed for a DIFFERENT date is
+    exactly the kind of mismatch that caused the original bug."""
+    from src.api.models.booking import BOOKING_TYPE_RULES, BookingType as BT
+
+    payload = _booking_payload(BT.genes_kids)
+    now = datetime.now(timezone.utc)
+    if payload["session_date"] != now.date().isoformat():
+        pytest.skip("Helper chose a future day, not today, for the current time of day - nothing to test right now")
+
+    response = client.post("/bookings", json=payload)
+    assert response.status_code == 201
+
+
 def test_create_personal_virtual_booking_priced_correctly(mock_aws_infra, mock_stripe_checkout):
     """The new Zoom option — confirmed $40, matching client_travels pricing
     (Debo reasoned no gas cost either way)."""

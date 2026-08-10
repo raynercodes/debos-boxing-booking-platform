@@ -369,6 +369,21 @@ Resources:
       # drop in duration keeps the real cost close to flat, sometimes
       # even lower, despite the higher memory number.
       MemorySize: 1024
+      # Tags added deliberately here (matching every other resource in
+      # this template) - also forces CloudFormation to genuinely
+      # reprocess this function's FULL configuration on next deploy,
+      # which is needed right now to correct real environment-variable
+      # drift: a raw `aws lambda update-function-configuration` call used
+      # earlier as a stale-cache workaround unintentionally REPLACED
+      # (not merged) this function's entire Environment.Variables map,
+      # wiping out everything CloudFormation had configured except the
+      # one variable that call explicitly set. CloudFormation's own
+      # tracked template was never affected - only the live resource
+      # drifted - which is exactly why a normal deploy saw "no changes"
+      # despite the function actually being broken.
+      Tags:
+        Project: debos-boxing
+        Environment: !Ref Environment
       Events:
         ApiEvent:
           Type: Api

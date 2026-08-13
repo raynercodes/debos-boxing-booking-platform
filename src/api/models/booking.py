@@ -196,8 +196,8 @@ BOOKING_TYPE_DISPLAY_NAMES: dict[str, str] = {
     "personal_client_travels": "Personal Training (Client Travels to You)",
     "personal_trainer_travels": "Personal Training (Trainer Travels to You)",
     "personal_virtual": "Virtual Personal Training",
-    "genes_adult": "Adult Group Class",
-    "genes_kids": "Kids Group Class",
+    "genes_adult": "Adult Gene's Class",
+    "genes_kids": "Kids Gene's Class",
 }
 
 AVAILABLE_TIMES_BY_TYPE: dict[str, list[str]] = {

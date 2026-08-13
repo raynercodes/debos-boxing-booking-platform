@@ -139,4 +139,4 @@ def test_new_booking_notification_uses_friendly_type_name_not_raw_enum():
 
     body = mock_send.call_args[0][2]
     assert "genes_adult" not in body
-    assert "Adult Group Class" in body
+    assert "Adult Gene's Class" in body

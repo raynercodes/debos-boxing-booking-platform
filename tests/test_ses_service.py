@@ -52,7 +52,7 @@ def test_new_booking_notification_uses_friendly_type_name_not_raw_enum():
 
     body = mock_client.send_email.call_args.kwargs["Message"]["Body"]["Text"]["Data"]
     assert "genes_adult" not in body
-    assert "Adult Group Class" in body
+    assert "Adult Gene's Class" in body
 
 
 def test_new_booking_notification_falls_back_to_generic_label_for_unknown_type():

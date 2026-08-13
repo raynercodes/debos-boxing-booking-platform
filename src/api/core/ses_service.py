@@ -90,7 +90,7 @@ class SesService:
             f"See you then — please arrive on time, geared up and ready to be great!\n"
             f"{receipt_line}\n"
             f"Questions before your session? Reach Debo directly at {ADMIN_PHONE_NUMBER} or debosboxingandfitness@gmail.com.\n\n"
-            f"Debo's Boxing and Fitness"
+            f"DEBO'S BOXING AND FITNESS"
         )
         self._send(booking["email"], subject, body)
 

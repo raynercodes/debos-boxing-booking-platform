@@ -85,6 +85,33 @@ def test_send_failure_is_swallowed_not_raised(monkeypatch):
         service.send_booking_confirmation(BOOKING)  # should not raise
 
 
+def test_http_error_logs_the_actual_response_body(monkeypatch, caplog):
+    """The real bug this fixes: urllib's HTTPError carries the RESPONSE
+    BODY from Resend (the actual, specific reason a request was
+    rejected), which the old exception handling never captured - only
+    the generic status line. This confirms the real body now makes it
+    into the logs, which is what actually diagnoses a 403/422/etc."""
+    monkeypatch.setenv("RESEND_SECRET_PATH", "fake-resend-secret-path")
+    service = ResendService()
+
+    mock_secrets_client = MagicMock()
+    mock_secrets_client.get_secret_value.return_value = {
+        "SecretString": '{"api_key": "re_test_fake_key"}'
+    }
+
+    mock_fp = MagicMock()
+    mock_fp.read.return_value = b'{"message": "This domain is not verified", "name": "validation_error"}'
+    http_error = urllib.error.HTTPError(
+        url="https://api.resend.com/emails", code=403, msg="Forbidden", hdrs=None, fp=mock_fp,
+    )
+
+    with patch("boto3.client", return_value=mock_secrets_client), \
+         patch("urllib.request.urlopen", side_effect=http_error):
+        service.send_booking_confirmation(BOOKING)  # should not raise
+
+    assert "This domain is not verified" in caplog.text
+
+
 def test_cancellation_notice_includes_refund_info():
     service = ResendService()
     refund_info = {"amount_usd": 100.0, "receipt_url": "https://pay.stripe.com/receipts/fake"}

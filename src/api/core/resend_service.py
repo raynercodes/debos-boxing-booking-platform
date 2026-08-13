@@ -70,7 +70,19 @@ class ResendService:
             with urllib.request.urlopen(request, timeout=10) as response:
                 response.read()
             logger.info("Email sent via Resend to %s: %s", to_address, subject)
-        except (urllib.error.URLError, urllib.error.HTTPError, KeyError, ValueError) as exc:
+        except urllib.error.HTTPError as exc:
+            # Specifically captures the RESPONSE BODY, not just the status
+            # line - urllib's HTTPError carries the real, detailed error
+            # message Resend actually sent back, which the status line
+            # alone ("HTTP Error 403: Forbidden") never shows. This is
+            # exactly the piece needed to diagnose WHY a request was
+            # rejected, rather than just knowing THAT it was.
+            error_body = exc.read().decode("utf-8", errors="replace")
+            logger.error(
+                "Failed to send email via Resend to %s (%s): HTTP %s - %s",
+                to_address, subject, exc.code, error_body, exc_info=True,
+            )
+        except (urllib.error.URLError, KeyError, ValueError) as exc:
             # Swallowed deliberately, matching ses_service.py's own
             # reasoning: a failed notification email should never roll
             # back or fail an action (booking/cancellation) that already
@@ -85,7 +97,7 @@ class ResendService:
             f"but haven't completed payment yet. Here's your checkout link:\n\n"
             f"{checkout_url}\n\n"
             f"This link is still valid — pick up right where you left off.\n\n"
-            f"Debo's Boxing and Fitness"
+            f"DEBO'S BOXING AND FITNESS"
         )
         self._send(booking["email"], subject, body)
 
@@ -98,7 +110,7 @@ class ResendService:
             f"See you then — please arrive on time, geared up and ready to be great!\n"
             f"{receipt_line}\n"
             f"Questions before your session? Reach Debo directly at {ADMIN_PHONE_NUMBER} or debosboxingandfitness@gmail.com.\n\n"
-            f"Debo's Boxing and Fitness"
+            f"DEBO'S BOXING AND FITNESS"
         )
         self._send(booking["email"], subject, body)
 
@@ -166,7 +178,7 @@ class ResendService:
             f"Just a reminder — your session with Debo is tomorrow, "
             f"{booking['session_date']} at {booking['session_time']}.\n\n"
             f"See you then!\n\n"
-            f"Debo's Boxing and Fitness"
+            f"DEBO'S BOXING AND FITNESS"
         )
         self._send(booking["email"], subject, body)
 

@@ -26,6 +26,7 @@ import urllib.error
 import boto3
 
 from src.api.core.logging_config import get_logger
+from src.api.models.booking import BOOKING_TYPE_DISPLAY_NAMES
 
 logger = get_logger(__name__)
 
@@ -108,13 +109,25 @@ class ResendService:
             logger.error("Failed to send email via Resend to %s (%s): %s", to_address, subject, exc, exc_info=True)
 
     def send_checkout_link(self, booking: dict, checkout_url: str) -> None:
+        """Sent immediately when checkout STARTS, not when it confirms —
+        the recovery path for someone who gets redirected to Stripe, then
+        closes the tab, loses connection, or just gets distracted before
+        paying. Without this, that booking sits stuck in 'processing' for
+        the full 30-minute expiry with zero way back in, even though
+        Stripe's own session URL is still perfectly valid and reusable
+        the whole time. Re-sending them the exact same URL costs nothing
+        and creates no duplicate booking or charge risk — it's the same
+        checkout session, just given a second entry point."""
         subject = f"Complete your booking with {EMAIL_SIGNATURE}"
         body = (
             f"Hi {booking['name']},\n\n"
-            f"You started a booking for {booking['session_date']} at {booking['session_time']} "
-            f"but haven't completed payment yet. Here's your checkout link:\n\n"
+            f"You started booking a session for {booking['session_date']} at {booking['session_time']}.\n\n"
+            f"If you were redirected to payment automatically, you can ignore this email. "
+            f"But if your browser closed, your connection dropped, or you just didn't finish — "
+            f"use this link to complete your payment:\n\n"
             f"{checkout_url}\n\n"
-            f"This link is still valid — pick up right where you left off.\n\n"
+            f"This link is valid for 30 minutes from when you started booking. After that, "
+            f"you'll need to submit a new booking.\n\n"
             f"{EMAIL_SIGNATURE}"
         )
         self._send(booking["email"], subject, body)
@@ -140,7 +153,7 @@ class ResendService:
             f"Email: {booking['email']}\n"
             f"Phone: {booking['phone']}\n"
             f"Date: {booking['session_date']} at {booking['session_time']}\n"
-            f"Type: {booking['booking_type']}\n"
+            f"Type: {BOOKING_TYPE_DISPLAY_NAMES.get(booking['booking_type'], 'Booking')}\n"
             f"Price: ${booking['price_usd']}"
         )
         self._send(admin_email, subject, body)
@@ -177,7 +190,7 @@ class ResendService:
         self._send(admin_email, subject, body)
 
     def send_brute_force_alert(self, ip_address: str, lockout_count: int, admin_email: str) -> None:
-        subject = "REVIEW NEEDED: Someone is trying to break into your admin login"
+        subject = "ACTION NEEDED: Someone is trying to break into your admin login"
         body = (
             f"Someone has now been locked out {lockout_count} separate times trying to "
             f"log into your admin panel.\n\n"

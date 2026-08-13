@@ -19,6 +19,7 @@ import boto3
 from botocore.exceptions import ClientError, BotoCoreError
 
 from src.api.core.logging_config import get_logger
+from src.api.models.booking import BOOKING_TYPE_DISPLAY_NAMES
 
 logger = get_logger(__name__)
 
@@ -108,7 +109,7 @@ class SesService:
             f"Client: {booking['name']}\n"
             f"Phone: {booking['phone']}\n"
             f"Email: {booking['email']}\n"
-            f"Type: {booking['booking_type']}\n"
+            f"Type: {BOOKING_TYPE_DISPLAY_NAMES.get(booking['booking_type'], 'Booking')}\n"
             f"Date: {booking['session_date']} at {booking['session_time']}\n"
             f"Payment amount sent to you: ${booking['price_usd']}\n"
         )
@@ -153,7 +154,7 @@ class SesService:
         of. Geo-location note: not included yet — this needs CloudFront's
         real viewer-location headers, which don't exist until CloudFront
         is actually enabled. Trivial to add here once that's live."""
-        subject = "REVIEW NEEDED: Someone is trying to break into your admin login"
+        subject = "ACTION NEEDED: Someone is trying to break into your admin login"
         body = (
             f"Someone has now been locked out {lockout_count} separate times trying to "
             f"log into your admin panel.\n\n"

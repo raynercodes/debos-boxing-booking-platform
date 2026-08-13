@@ -126,3 +126,17 @@ def test_cancellation_notice_includes_refund_info():
     body = mock_send.call_args[0][2]
     assert "$100.00" in body
     assert "5-10 business days" in body
+
+
+def test_new_booking_notification_uses_friendly_type_name_not_raw_enum():
+    """Same fix as ses_service.py - the raw database value should never
+    leak into a customer/admin-facing email."""
+    from unittest.mock import patch
+
+    service = ResendService()
+    with patch.object(service, "_send") as mock_send:
+        service.send_new_booking_notification(BOOKING, admin_email="debo@example.com")
+
+    body = mock_send.call_args[0][2]
+    assert "genes_adult" not in body
+    assert "Adult Group Class" in body

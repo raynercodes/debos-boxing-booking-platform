@@ -36,6 +36,7 @@ TEST_ENV_VARS = {
     "PASSWORD_PEPPER_PATH": "/debos-boxing/test/password-pepper",
     "STRIPE_SECRET_PATH": "/debos-boxing/test/stripe-secret",
     "ADMIN_EMAIL": "test-admin@example-test.invalid",
+    "NOTIFICATION_EMAIL": "test-notifications@example-test.invalid",
     "FRONTEND_BASE_URL": "https://test.example.invalid",
 }
 

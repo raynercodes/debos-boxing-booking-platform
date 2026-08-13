@@ -177,7 +177,7 @@ class ResendService:
         self._send(admin_email, subject, body)
 
     def send_brute_force_alert(self, ip_address: str, lockout_count: int, admin_email: str) -> None:
-        subject = "Security alert: repeated failed login attempts on your booking site"
+        subject = "REVIEW NEEDED: Someone is trying to break into your admin login"
         body = (
             f"Someone has now been locked out {lockout_count} separate times trying to "
             f"log into your admin panel.\n\n"

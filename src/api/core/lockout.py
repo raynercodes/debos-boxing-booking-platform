@@ -133,10 +133,16 @@ class LockoutManager:
                 )
 
                 if is_third_or_later_lockout:
-                    admin_email = os.environ.get("ADMIN_EMAIL")
-                    if admin_email:
+                    # Deliberately ADMIN_EMAIL here, not NOTIFICATION_EMAIL
+                    # - a security alert sitting in the same inbox as
+                    # routine "new booking" emails risks getting the same
+                    # half-second glance and dismissed as more of the
+                    # same. This goes to Debo's own personal email
+                    # specifically, so it actually stands out.
+                    personal_email = os.environ.get("ADMIN_EMAIL")
+                    if personal_email:
                         get_email_service().send_brute_force_alert(
-                            ip_address=client_ip, lockout_count=new_stage, admin_email=admin_email,
+                            ip_address=client_ip, lockout_count=new_stage, admin_email=personal_email,
                         )
                     logger.warning(
                         "Brute-force alert: %s separate lockouts triggered from IP %s",

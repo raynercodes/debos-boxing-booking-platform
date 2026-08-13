@@ -573,7 +573,7 @@ async def cancel_booking(booking_id: str, request: Optional[CancelBookingRequest
     # one) goes into both email bodies.
     ses = get_email_service()
     ses.send_cancellation_notice_to_client(item, reason, refund_info=refund_info)
-    ses.send_cancellation_notice_to_admin(item, reason, admin_email=os.environ["ADMIN_EMAIL"])
+    ses.send_cancellation_notice_to_admin(item, reason, admin_email=os.environ["NOTIFICATION_EMAIL"])
 
     logger.info("Booking %s cancelled by admin (reason: %s)", booking_id, reason)
     return _item_to_response(item)

@@ -88,7 +88,7 @@ async def stripe_webhook(request: Request):
         # references the status field, only name/date/time/price.
         ses = get_email_service()
         ses.send_booking_confirmation(booking, receipt_url=receipt_url)
-        ses.send_new_booking_notification(booking, admin_email=os.environ["ADMIN_EMAIL"])
+        ses.send_new_booking_notification(booking, admin_email=os.environ["NOTIFICATION_EMAIL"])
 
         logger.info("Booking %s confirmed via Stripe webhook", booking_id)
 

@@ -72,6 +72,17 @@ Parameters:
     Type: String
     Description: "The gym admin's login email — stored as a plain parameter, not a secret, since it's an identifier, not a credential."
 
+  NotificationEmail:
+    Type: String
+    Description: >
+      Where booking/cancellation/security notifications actually get
+      sent - separate from AdminEmail on purpose. AdminEmail is a login
+      credential (Debo's personal email); this is the business inbox
+      that should receive day-to-day operational emails. These were
+      conflated into one shared variable, meaning every notification
+      went to Debo's personal inbox regardless of what he'd actually
+      prefer for business notifications specifically.
+
   FrontendBaseUrl:
     Type: String
     Default: "https://debosboxingandfitness.com"
@@ -111,6 +122,7 @@ Globals:
         PASSWORD_PEPPER_PATH: !Ref PasswordPepperSecret
         STRIPE_SECRET_PATH: !Ref StripeSecret
         ADMIN_EMAIL: !Ref AdminEmail
+        NOTIFICATION_EMAIL: !Ref NotificationEmail
         FRONTEND_BASE_URL: !Ref FrontendBaseUrl
         LOG_LEVEL: "INFO"
         # Deliberately forces a real diff on the Environment property

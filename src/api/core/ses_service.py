@@ -153,7 +153,7 @@ class SesService:
         of. Geo-location note: not included yet — this needs CloudFront's
         real viewer-location headers, which don't exist until CloudFront
         is actually enabled. Trivial to add here once that's live."""
-        subject = "Security alert: repeated failed login attempts on your booking site"
+        subject = "REVIEW NEEDED: Someone is trying to break into your admin login"
         body = (
             f"Someone has now been locked out {lockout_count} separate times trying to "
             f"log into your admin panel.\n\n"

@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 
 from src.api.core.database import get_db_service
 from src.api.core.bookings_repository import BookingRepository
-from src.api.core.ses_service import get_ses_service
+from src.api.core.email_service import get_email_service
 from src.api.models.booking import GYM_TIMEZONE
 from src.api.core.logging_config import get_logger
 
@@ -33,7 +33,7 @@ def handler(event, context):
     logger.info("Reminder job triggered for date: %s", tomorrow_date)
 
     repo = BookingRepository(get_db_service())
-    ses = get_ses_service()
+    ses = get_email_service()
 
     items = repo.query_by_date(tomorrow_date)
 

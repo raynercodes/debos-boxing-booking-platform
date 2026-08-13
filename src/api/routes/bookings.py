@@ -17,7 +17,7 @@ from src.api.core.security import get_security_service
 from src.api.core.database import get_db_service
 from src.api.core.bookings_repository import BookingRepository
 from src.api.core.stripe_service import get_stripe_service
-from src.api.core.ses_service import get_ses_service
+from src.api.core.email_service import get_email_service
 from src.api.core.exceptions import (
     AppError, BookingNotFoundError, BookingAlreadyCancelledError,
     SlotProcessingError, SlotTakenError, TooManyProcessingBookingsError,
@@ -319,7 +319,7 @@ async def create_booking(
     # tab, dropped connection, distracted), this is how they get back
     # into the SAME checkout session without their booking sitting
     # stranded for the full 30-minute expiry with no way back in.
-    get_ses_service().send_checkout_link(
+    get_email_service().send_checkout_link(
         {"name": request.name, "email": request.email,
          "session_date": request.session_date, "session_time": request.session_time},
         checkout_url=session.url,
@@ -571,7 +571,7 @@ async def cancel_booking(booking_id: str, request: Optional[CancelBookingRequest
     # a no-op, not a real state change). The `reason` captured earlier
     # (typed by Debo, or DEFAULT_CANCELLATION_REASON if he didn't provide
     # one) goes into both email bodies.
-    ses = get_ses_service()
+    ses = get_email_service()
     ses.send_cancellation_notice_to_client(item, reason, refund_info=refund_info)
     ses.send_cancellation_notice_to_admin(item, reason, admin_email=os.environ["ADMIN_EMAIL"])
 

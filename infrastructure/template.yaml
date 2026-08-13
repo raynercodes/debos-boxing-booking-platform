@@ -7,6 +7,21 @@ Parameters:
     Type: String
     AllowedValues: [dev, staging, prod]
 
+  EmailProvider:
+    Type: String
+    Default: "ses"
+    AllowedValues: ["ses", "resend"]
+    Description: >
+      Temporary bridge while AWS SES production access is pending
+      reconsideration - a denial specifically citing sender
+      reputation/deliverability, addressed by adding DMARC, with a
+      resubmission pending. Set to "resend" to route all outbound email
+      through Resend instead of SES without touching any application
+      code - just this one parameter, redeployed. Switch back to "ses"
+      (the default) the moment SES clears; this parameter, and the
+      Resend code path it enables, can be removed entirely once that
+      happens and this becomes permanent history rather than active config.
+
   EnableCloudFront:
     Type: String
     Default: "false"
@@ -98,6 +113,21 @@ Globals:
         ADMIN_EMAIL: !Ref AdminEmail
         FRONTEND_BASE_URL: !Ref FrontendBaseUrl
         LOG_LEVEL: "INFO"
+        # Deliberately forces a real diff on the Environment property
+        # itself, not some unrelated property - CloudFormation does
+        # targeted, per-property updates, not a full resource rewrite
+        # whenever ANYTHING changes. Adding Tags earlier changed Tags
+        # specifically, so CloudFormation only touched Tags - it never
+        # recognized Environment itself as different (template-to-
+        # template comparison, not template-to-live-resource), so the
+        # actual drifted/wiped live variables were never corrected. This
+        # marker guarantees every function's Environment genuinely
+        # differs from what's tracked, forcing a real, full rewrite that
+        # restores everything correctly. Safe to remove once confirmed
+        # fixed - it's not meaningful config, just a forcing mechanism.
+        DRIFT_CORRECTION_MARKER: "1"
+        EMAIL_PROVIDER: !Ref EmailProvider
+        RESEND_SECRET_PATH: !Ref ResendSecret
 
 Resources:
 
@@ -160,6 +190,20 @@ Resources:
     Type: AWS::KMS::Key
     Properties:
       Description: !Sub "Encrypts Stripe API key + webhook signing secret — debos-boxing-${Environment}"
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowAccountRootFullAccess
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:aws:iam::${AWS::AccountId}:root
+            Action: "kms:*"
+            Resource: "*"
+
+  ResendKmsKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: !Sub "Encrypts the Resend API key — debos-boxing-${Environment}"
       KeyPolicy:
         Version: '2012-10-17'
         Statement:
@@ -262,6 +306,18 @@ Resources:
       KmsKeyId: !Ref StripeKmsKey
       SecretString: '{"api_key": "PLACEHOLDER_SET_MANUALLY_AFTER_DEPLOY", "webhook_secret": "PLACEHOLDER_SET_MANUALLY_AFTER_DEPLOY"}'
 
+  ResendSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub /debos-boxing/${Environment}/resend-secret
+      Description: >
+        Resend API key — placeholder value, MUST be set manually post-deploy.
+        Temporary bridge while AWS SES production access is pending
+        reconsideration — see EmailProvider parameter below. Not used at
+        all unless EmailProvider is explicitly set to "resend".
+      KmsKeyId: !Ref ResendKmsKey
+      SecretString: '{"api_key": "PLACEHOLDER_SET_MANUALLY_AFTER_DEPLOY"}'
+
   AdminCredentialsSecret:
     Type: AWS::SecretsManager::Secret
     Properties:
@@ -314,7 +370,8 @@ Resources:
                   - !Ref PasswordPepperSecret
                   - !Ref AdminCredentialsSecret
                   - !Ref StripeSecret
-              # KMS — scoped to exactly the five keys this project owns, NOT
+                  - !Ref ResendSecret
+              # KMS — scoped to exactly the six keys this project owns, NOT
               # a wildcard Resource: '*'. Since we control key creation in
               # this same template, we can reference their real ARNs
               # directly — no reason to grant broader decrypt access than
@@ -329,6 +386,7 @@ Resources:
                   - !GetAtt AdminCredentialsKmsKey.Arn
                   - !GetAtt DynamoDbKmsKey.Arn
                   - !GetAtt StripeKmsKey.Arn
+                  - !GetAtt ResendKmsKey.Arn
               # SES — Resource: "*" here is deliberate, not a loosening of
               # security. FROM_ADDRESS is a hardcoded constant in our own
               # application code (ses_service.py), never user-controllable

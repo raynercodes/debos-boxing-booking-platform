@@ -22,7 +22,7 @@ from botocore.exceptions import ClientError, BotoCoreError
 
 from src.api.core.database import DynamoDBService
 from src.api.core.exceptions import LockedOutError, ExternalServiceError
-from src.api.core.ses_service import get_ses_service
+from src.api.core.email_service import get_email_service
 from src.api.core.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -135,7 +135,7 @@ class LockoutManager:
                 if is_third_or_later_lockout:
                     admin_email = os.environ.get("ADMIN_EMAIL")
                     if admin_email:
-                        get_ses_service().send_brute_force_alert(
+                        get_email_service().send_brute_force_alert(
                             ip_address=client_ip, lockout_count=new_stage, admin_email=admin_email,
                         )
                     logger.warning(

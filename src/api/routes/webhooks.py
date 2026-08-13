@@ -19,7 +19,7 @@ from fastapi import APIRouter, Request
 from src.api.core.stripe_service import get_stripe_service
 from src.api.core.database import get_db_service
 from src.api.core.bookings_repository import BookingRepository
-from src.api.core.ses_service import get_ses_service
+from src.api.core.email_service import get_email_service
 from src.api.models.booking import BookingStatus, requires_slot_claim, BookingType
 from src.api.core.logging_config import get_logger
 from src.api.core.exceptions import WebhookSignatureError
@@ -86,7 +86,7 @@ async def stripe_webhook(request: Request):
         # booking dict here is the PRE-update snapshot (status still says
         # "processing" in memory) — fine, since neither email body
         # references the status field, only name/date/time/price.
-        ses = get_ses_service()
+        ses = get_email_service()
         ses.send_booking_confirmation(booking, receipt_url=receipt_url)
         ses.send_new_booking_notification(booking, admin_email=os.environ["ADMIN_EMAIL"])
 

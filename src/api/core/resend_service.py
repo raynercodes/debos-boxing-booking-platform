@@ -1,0 +1,181 @@
+"""
+TEMPORARY FILE — delete entirely once AWS SES production access clears.
+
+Resend email bridge. Fully isolated from ses_service.py on purpose —
+zero shared code, zero shared state — so cleanup later is exactly:
+delete this file, delete email_service.py, revert the import lines in
+webhooks.py, bookings.py, lockout.py, and reminder_handler.py back to
+importing get_ses_service directly. Nothing about ses_service.py itself
+was ever touched.
+
+Matches SesService's exact public method signatures (send_checkout_link,
+send_booking_confirmation, etc.) so it's a genuine drop-in replacement —
+whichever one email_service.py hands back, calling code never needs to
+know or care which.
+
+Uses urllib directly rather than the resend SDK, deliberately — avoids
+adding a new dependency to requirements.txt for something explicitly
+meant to be short-lived, not a permanent architectural choice.
+"""
+
+import os
+import json
+import urllib.request
+import urllib.error
+
+import boto3
+
+from src.api.core.logging_config import get_logger
+
+logger = get_logger(__name__)
+
+FROM_ADDRESS = "bookings@debosboxingandfitness.com"
+
+ADMIN_PHONE_NUMBER = "(912) 278-1181"
+
+
+class ResendService:
+    def __init__(self) -> None:
+        self._api_key = None
+
+    def _get_api_key(self) -> str:
+        """Fetched once per warm Lambda container, cached for its
+        lifetime — same L1-caching pattern used for every other secret
+        in this project."""
+        if self._api_key is None:
+            secrets_client = boto3.client("secretsmanager")
+            secret_path = os.environ["RESEND_SECRET_PATH"]
+            response = secrets_client.get_secret_value(SecretId=secret_path)
+            self._api_key = json.loads(response["SecretString"])["api_key"]
+        return self._api_key
+
+    def _send(self, to_address: str, subject: str, body_text: str) -> None:
+        try:
+            api_key = self._get_api_key()
+            payload = json.dumps({
+                "from": FROM_ADDRESS,
+                "to": to_address,
+                "subject": subject,
+                "text": body_text,
+            }).encode("utf-8")
+            request = urllib.request.Request(
+                "https://api.resend.com/emails",
+                data=payload,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                method="POST",
+            )
+            with urllib.request.urlopen(request, timeout=10) as response:
+                response.read()
+            logger.info("Email sent via Resend to %s: %s", to_address, subject)
+        except (urllib.error.URLError, urllib.error.HTTPError, KeyError, ValueError) as exc:
+            # Swallowed deliberately, matching ses_service.py's own
+            # reasoning: a failed notification email should never roll
+            # back or fail an action (booking/cancellation) that already
+            # completed successfully.
+            logger.error("Failed to send email via Resend to %s (%s): %s", to_address, subject, exc, exc_info=True)
+
+    def send_checkout_link(self, booking: dict, checkout_url: str) -> None:
+        subject = "Complete your booking with DEBO'S BOXING AND FITNESS"
+        body = (
+            f"Hi {booking['name']},\n\n"
+            f"You started a booking for {booking['session_date']} at {booking['session_time']} "
+            f"but haven't completed payment yet. Here's your checkout link:\n\n"
+            f"{checkout_url}\n\n"
+            f"This link is still valid — pick up right where you left off.\n\n"
+            f"Debo's Boxing and Fitness"
+        )
+        self._send(booking["email"], subject, body)
+
+    def send_booking_confirmation(self, booking: dict, receipt_url: str = None) -> None:
+        subject = "Your session with DEBO'S BOXING AND FITNESS is confirmed!"
+        receipt_line = f"\nYour payment receipt: {receipt_url}\n" if receipt_url else ""
+        body = (
+            f"Hi {booking['name']},\n\n"
+            f"Your booked session is confirmed for {booking['session_date']} at {booking['session_time']} with Debo.\n\n"
+            f"See you then — please arrive on time, geared up and ready to be great!\n"
+            f"{receipt_line}\n"
+            f"Questions before your session? Reach Debo directly at {ADMIN_PHONE_NUMBER} or debosboxingandfitness@gmail.com.\n\n"
+            f"Debo's Boxing and Fitness"
+        )
+        self._send(booking["email"], subject, body)
+
+    def send_new_booking_notification(self, booking: dict, admin_email: str) -> None:
+        subject = f"New booking: {booking['name']} on {booking['session_date']}"
+        body = (
+            f"New confirmed booking:\n\n"
+            f"Name: {booking['name']}\n"
+            f"Email: {booking['email']}\n"
+            f"Phone: {booking['phone']}\n"
+            f"Date: {booking['session_date']} at {booking['session_time']}\n"
+            f"Type: {booking['booking_type']}\n"
+            f"Price: ${booking['price_usd']}"
+        )
+        self._send(admin_email, subject, body)
+
+    def send_cancellation_notice_to_client(self, booking: dict, reason: str, refund_info: dict = None) -> None:
+        subject = "Your booked session at DEBO'S BOXING AND FITNESS has been cancelled"
+        refund_line = ""
+        if refund_info:
+            refund_line = (
+                f"\nA refund of ${refund_info['amount_usd']:.2f} has been issued back to your original "
+                f"payment method — please allow 5-10 business days for it to appear on your statement.\n"
+            )
+            if refund_info.get("receipt_url"):
+                refund_line += f"You can view the refund on your receipt here: {refund_info['receipt_url']}\n"
+        body = (
+            f"Hi {booking['name']},\n\n"
+            f"Sorry to inform you, but your session on {booking['session_date']} at {booking['session_time']} has been cancelled by Debo.\n\n"
+            f"Cancelation reason: {reason}\n"
+            f"{refund_line}\n"
+            f"If you have any questions or want to rebook, please reach out to Debo directly at {ADMIN_PHONE_NUMBER} or debosboxingandfitness@gmail.com.\n\n"
+            f"DEBO'S BOXING AND FITNESS"
+        )
+        self._send(booking["email"], subject, body)
+
+    def send_cancellation_notice_to_admin(self, booking: dict, reason: str, admin_email: str) -> None:
+        subject = f"Booking cancelled for {booking['name']} on {booking['session_date']}"
+        body = (
+            f"You cancelled the following booking:\n\n"
+            f"Name: {booking['name']}\n"
+            f"Email: {booking['email']}\n"
+            f"Date: {booking['session_date']} at {booking['session_time']}\n"
+            f"Reason: {reason}"
+        )
+        self._send(admin_email, subject, body)
+
+    def send_brute_force_alert(self, ip_address: str, lockout_count: int, admin_email: str) -> None:
+        subject = "Security alert: repeated failed login attempts on your booking site"
+        body = (
+            f"Someone has now been locked out {lockout_count} separate times trying to "
+            f"log into your admin panel.\n\n"
+            f"Source IP address: {ip_address}\n\n"
+            f"This is automatically logged — no action is required from you right now, "
+            f"but if this continues, that IP address can be manually blocked from "
+            f"reaching the site entirely.\n\n"
+            f"DEBO'S BOXING AND FITNESS — Security"
+        )
+        self._send(admin_email, subject, body)
+
+    def send_reminder(self, booking: dict) -> None:
+        subject = f"Reminder: your session tomorrow at {booking['session_time']}"
+        body = (
+            f"Hi {booking['name']},\n\n"
+            f"Just a reminder — your session with Debo is tomorrow, "
+            f"{booking['session_date']} at {booking['session_time']}.\n\n"
+            f"See you then!\n\n"
+            f"Debo's Boxing and Fitness"
+        )
+        self._send(booking["email"], subject, body)
+
+
+_resend_service = None
+
+
+def get_resend_service() -> ResendService:
+    global _resend_service
+    if _resend_service is None:
+        _resend_service = ResendService()
+    return _resend_service

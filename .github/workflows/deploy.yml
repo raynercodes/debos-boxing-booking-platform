@@ -18,6 +18,14 @@ on:
         options:
           - staging
           - prod
+      email_provider:
+        description: 'Temporary SES/Resend bridge - leave as ses unless actively switching due to pending SES production access. Only meaningful for prod (staging always uses SES test-mode regardless).'
+        required: false
+        type: choice
+        default: ses
+        options:
+          - ses
+          - resend
 
 permissions:
   id-token: write   # required for OIDC — lets this workflow request an AWS credential
@@ -264,6 +272,7 @@ jobs:
               ParameterKey=AdminEmail,ParameterValue=${{ secrets.ADMIN_EMAIL }} \
               ParameterKey=FrontendBaseUrl,ParameterValue=https://debosboxingandfitness.com \
               ParameterKey=RegionalCustomDomainCertArn,ParameterValue=arn:aws:acm:us-east-1:331191957820:certificate/8a256ae7-d031-4834-a1d3-8b15b8bfe0e0 \
+              ParameterKey=EmailProvider,ParameterValue=${{ inputs.email_provider }} \
             --region us-east-1
           aws cloudformation wait change-set-create-complete \
             --stack-name debos-boxing-booking-platform-staging \
@@ -403,6 +412,7 @@ jobs:
               ParameterKey=AdminEmail,ParameterValue=${{ secrets.ADMIN_EMAIL }} \
               ParameterKey=FrontendBaseUrl,ParameterValue=https://debosboxingandfitness.com \
               ParameterKey=RegionalCustomDomainCertArn,ParameterValue=arn:aws:acm:us-east-1:331191957820:certificate/8a256ae7-d031-4834-a1d3-8b15b8bfe0e0 \
+              ParameterKey=EmailProvider,ParameterValue=${{ inputs.email_provider }} \
             --region us-east-1
           aws cloudformation wait change-set-create-complete \
             --stack-name debos-boxing-booking-platform-prod \

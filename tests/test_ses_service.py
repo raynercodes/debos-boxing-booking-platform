@@ -22,6 +22,7 @@ def _service_with_mock_client() -> tuple:
     return service, mock_client
 
 
+
 def test_booking_confirmation_sent_to_client():
     service, mock_client = _service_with_mock_client()
     service.send_booking_confirmation(BOOKING)

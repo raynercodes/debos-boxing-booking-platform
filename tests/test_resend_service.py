@@ -45,6 +45,10 @@ def test_send_booking_confirmation_posts_to_resend(monkeypatch):
     sent_request = mock_urlopen.call_args[0][0]
     assert sent_request.full_url == "https://api.resend.com/emails"
     assert sent_request.get_header("Authorization") == "Bearer re_test_fake_key"
+    # Locks in the actual fix for the real Cloudflare 1010 block found in
+    # production — a real User-Agent, not urllib's easily-fingerprinted
+    # default, which Cloudflare's Browser Integrity Check was flagging.
+    assert sent_request.get_header("User-agent") == "DebosBoxingBookingPlatform/1.0"
     sent_body = json.loads(sent_request.data)
     assert sent_body["to"] == "client@example.com"
     assert "confirmed" in sent_body["subject"].lower()

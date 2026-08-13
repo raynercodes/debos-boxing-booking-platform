@@ -24,6 +24,13 @@ logger = get_logger(__name__)
 
 FROM_ADDRESS = "bookings@debosboxingandfitness.com"
 
+# Single source of truth for the signature/business name across every
+# email - exactly the kind of thing that drifted out of sync when it was
+# hardcoded separately in each method (one spot ended up as "Debo's
+# Boxing and Fitness" instead of the correct all-caps form). One constant
+# means that specific class of inconsistency can't happen again.
+EMAIL_SIGNATURE = "DEBO'S BOXING AND FITNESS"
+
 # Real, not placeholder — only ever surfaced in transactional emails where
 # there's a legitimate, immediate reason someone would need it (a
 # confirmed or just-cancelled real booking). Deliberately never displayed
@@ -67,7 +74,7 @@ class SesService:
         the whole time. Re-sending them the exact same URL costs nothing
         and creates no duplicate booking or charge risk — it's the same
         checkout session, just given a second entry point."""
-        subject = "Complete your booking with DEBO'S BOXING AND FITNESS"
+        subject = f"Complete your booking with {EMAIL_SIGNATURE}"
         body = (
             f"Hi {booking['name']},\n\n"
             f"You started booking a session for {booking['session_date']} at {booking['session_time']}.\n\n"
@@ -77,12 +84,12 @@ class SesService:
             f"{checkout_url}\n\n"
             f"This link is valid for 30 minutes from when you started booking. After that, "
             f"you'll need to submit a new booking.\n\n"
-            f"DEBO'S BOXING AND FITNESS"
+            f"{EMAIL_SIGNATURE}"
         )
         self._send(booking["email"], subject, body)
 
     def send_booking_confirmation(self, booking: dict, receipt_url: str = None) -> None:
-        subject = "Your session with DEBO'S BOXING AND FITNESS is confirmed!"
+        subject = f"Your session with {EMAIL_SIGNATURE} is confirmed!"
         receipt_line = f"\nYour payment receipt: {receipt_url}\n" if receipt_url else ""
         body = (
             f"Hi {booking['name']},\n\n"
@@ -90,7 +97,7 @@ class SesService:
             f"See you then — please arrive on time, geared up and ready to be great!\n"
             f"{receipt_line}\n"
             f"Questions before your session? Reach Debo directly at {ADMIN_PHONE_NUMBER} or debosboxingandfitness@gmail.com.\n\n"
-            f"DEBO'S BOXING AND FITNESS"
+            f"{EMAIL_SIGNATURE}"
         )
         self._send(booking["email"], subject, body)
 
@@ -108,7 +115,7 @@ class SesService:
         self._send(admin_email, subject, body)
 
     def send_cancellation_notice_to_client(self, booking: dict, reason: str, refund_info: dict = None) -> None:
-        subject = "Your booked session at DEBO'S BOXING AND FITNESS has been cancelled"
+        subject = f"Your booked session at {EMAIL_SIGNATURE} has been cancelled"
         refund_line = ""
         if refund_info:
             refund_line = (
@@ -123,7 +130,7 @@ class SesService:
             f"Cancelation reason: {reason}\n"
             f"{refund_line}\n"
             f"If you have any questions or want to rebook, please reach out to Debo directly at {ADMIN_PHONE_NUMBER} or debosboxingandfitness@gmail.com.\n\n"
-            f"DEBO'S BOXING AND FITNESS"
+            f"{EMAIL_SIGNATURE}"
         )
         self._send(booking["email"], subject, body)
 
@@ -154,17 +161,17 @@ class SesService:
             f"This is automatically logged — no action is required from you right now, "
             f"but if this continues, that IP address can be manually blocked from "
             f"reaching the site entirely.\n\n"
-            f"DEBO'S BOXING AND FITNESS — Security"
+            f"{EMAIL_SIGNATURE} — Security"
         )
         self._send(admin_email, subject, body)
 
     def send_reminder(self, booking: dict) -> None:
-        subject = "Reminder: your booked training session with DEBO'S BOXING AND FITNESS is tomorrow"
+        subject = f"Reminder: your booked training session with {EMAIL_SIGNATURE} is tomorrow"
         body = (
             f"Hi {booking['name']},\n\n"
             f"Just a reminder — your session is tomorrow, {booking['session_date']} at {booking['session_time']}.\n\n"
             f"See you then!\n\n"
-            f"DEBO'S BOXING AND FITNESS"
+            f"{EMAIL_SIGNATURE}"
         )
         self._send(booking["email"], subject, body)
 

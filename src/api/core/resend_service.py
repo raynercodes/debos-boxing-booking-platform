@@ -31,6 +31,11 @@ logger = get_logger(__name__)
 
 FROM_ADDRESS = "bookings@debosboxingandfitness.com"
 
+# Same constant, same purpose, as ses_service.py - single source of
+# truth so the signature can never drift out of sync between the two
+# files the way it did before this fix.
+EMAIL_SIGNATURE = "DEBO'S BOXING AND FITNESS"
+
 ADMIN_PHONE_NUMBER = "(912) 278-1181"
 
 
@@ -103,19 +108,19 @@ class ResendService:
             logger.error("Failed to send email via Resend to %s (%s): %s", to_address, subject, exc, exc_info=True)
 
     def send_checkout_link(self, booking: dict, checkout_url: str) -> None:
-        subject = "Complete your booking with DEBO'S BOXING AND FITNESS"
+        subject = f"Complete your booking with {EMAIL_SIGNATURE}"
         body = (
             f"Hi {booking['name']},\n\n"
             f"You started a booking for {booking['session_date']} at {booking['session_time']} "
             f"but haven't completed payment yet. Here's your checkout link:\n\n"
             f"{checkout_url}\n\n"
             f"This link is still valid — pick up right where you left off.\n\n"
-            f"Debo's Boxing and Fitness"
+            f"{EMAIL_SIGNATURE}"
         )
         self._send(booking["email"], subject, body)
 
     def send_booking_confirmation(self, booking: dict, receipt_url: str = None) -> None:
-        subject = "Your session with DEBO'S BOXING AND FITNESS is confirmed!"
+        subject = f"Your session with {EMAIL_SIGNATURE} is confirmed!"
         receipt_line = f"\nYour payment receipt: {receipt_url}\n" if receipt_url else ""
         body = (
             f"Hi {booking['name']},\n\n"
@@ -123,7 +128,7 @@ class ResendService:
             f"See you then — please arrive on time, geared up and ready to be great!\n"
             f"{receipt_line}\n"
             f"Questions before your session? Reach Debo directly at {ADMIN_PHONE_NUMBER} or debosboxingandfitness@gmail.com.\n\n"
-            f"Debo's Boxing and Fitness"
+            f"{EMAIL_SIGNATURE}"
         )
         self._send(booking["email"], subject, body)
 
@@ -141,7 +146,7 @@ class ResendService:
         self._send(admin_email, subject, body)
 
     def send_cancellation_notice_to_client(self, booking: dict, reason: str, refund_info: dict = None) -> None:
-        subject = "Your booked session at DEBO'S BOXING AND FITNESS has been cancelled"
+        subject = f"Your booked session at {EMAIL_SIGNATURE} has been cancelled"
         refund_line = ""
         if refund_info:
             refund_line = (
@@ -156,7 +161,7 @@ class ResendService:
             f"Cancelation reason: {reason}\n"
             f"{refund_line}\n"
             f"If you have any questions or want to rebook, please reach out to Debo directly at {ADMIN_PHONE_NUMBER} or debosboxingandfitness@gmail.com.\n\n"
-            f"DEBO'S BOXING AND FITNESS"
+            f"{EMAIL_SIGNATURE}"
         )
         self._send(booking["email"], subject, body)
 
@@ -180,7 +185,7 @@ class ResendService:
             f"This is automatically logged — no action is required from you right now, "
             f"but if this continues, that IP address can be manually blocked from "
             f"reaching the site entirely.\n\n"
-            f"DEBO'S BOXING AND FITNESS — Security"
+            f"{EMAIL_SIGNATURE} — Security"
         )
         self._send(admin_email, subject, body)
 
@@ -191,7 +196,7 @@ class ResendService:
             f"Just a reminder — your session with Debo is tomorrow, "
             f"{booking['session_date']} at {booking['session_time']}.\n\n"
             f"See you then!\n\n"
-            f"Debo's Boxing and Fitness"
+            f"{EMAIL_SIGNATURE}"
         )
         self._send(booking["email"], subject, body)
 

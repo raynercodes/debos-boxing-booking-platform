@@ -1,0 +1,778 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Debo's Boxing and Fitness — Booking & Lead Automation Platform
+
+Parameters:
+  Environment:
+    Type: String
+    AllowedValues: [dev, staging, prod]
+
+  EmailProvider:
+    Type: String
+    Default: "ses"
+    AllowedValues: ["ses", "resend"]
+    Description: >
+      Temporary bridge while AWS SES production access is pending
+      reconsideration - a denial specifically citing sender
+      reputation/deliverability, addressed by adding DMARC, with a
+      resubmission pending. Set to "resend" to route all outbound email
+      through Resend instead of SES without touching any application
+      code - just this one parameter, redeployed. Switch back to "ses"
+      (the default) the moment SES clears; this parameter, and the
+      Resend code path it enables, can be removed entirely once that
+      happens and this becomes permanent history rather than active config.
+
+  EnableCloudFront:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: >
+      Set to true only once the AWS account has cleared CloudFront account
+      verification. New AWS accounts are sometimes restricted from creating
+      CloudFront distributions until AWS manually clears them — this hit us
+      on the fintech project too. Regional API Gateway custom domain (below)
+      works immediately regardless of this restriction, so the site is never
+      blocked waiting on CloudFront specifically.
+
+  EnableCustomDomain:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: >
+      Gates RegionalDomainName + RegionalDomainMapping specifically. This
+      exists because of a genuine, long-standing, still-unresolved
+      SAM/CloudFormation limitation: on a brand-new API's first-ever
+      deploy, the auto-generated API Gateway Stage gets a random hash-based
+      logical ID that can't be reliably referenced via DependsOn, so
+      BasePathMapping can race ahead of the stage actually existing and
+      fail with "Invalid stage identifier specified." The documented
+      workaround (confirmed across many real-world reports of this exact
+      SAM issue) is to deploy twice: once with this false (creates the API
+      + its stage cleanly), then again with this true (the stage already
+      exists by then, so the mapping succeeds). Only relevant for a
+      brand-new environment's very first deploy — leave true permanently
+      once it's succeeded once.
+
+  RegionalCustomDomainCertArn:
+    Type: String
+    Default: ""
+    Description: >
+      ACM cert ARN, same region as this stack, for the API Gateway Regional
+      custom domain. Must be validated BEFORE this stack deploys with
+      staging or prod — ACM validation is a separate, manual (DNS record)
+      step done once ahead of time, not something CloudFormation can wait
+      on inline. RECOMMENDATION: request ONE wildcard cert for
+      "*.debosboxingandfitness.com" rather than two separate certs — it
+      covers both api.debosboxingandfitness.com (prod) and
+      staging-api.debosboxingandfitness.com (staging) with a single DNS
+      validation round instead of two, and this same parameter value works
+      for both environments.
+
+  AdminEmail:
+    Type: String
+    Description: "The gym admin's login email — stored as a plain parameter, not a secret, since it's an identifier, not a credential."
+
+  NotificationEmail:
+    Type: String
+    Description: >
+      Where booking/cancellation/security notifications actually get
+      sent - separate from AdminEmail on purpose. AdminEmail is a login
+      credential (Debo's personal email); this is the business inbox
+      that should receive day-to-day operational emails. These were
+      conflated into one shared variable, meaning every notification
+      went to Debo's personal inbox regardless of what he'd actually
+      prefer for business notifications specifically.
+
+  FrontendBaseUrl:
+    Type: String
+    Default: "https://debosboxingandfitness.com"
+    Description: >
+      Base URL of the Framer frontend, used to build Stripe checkout
+      success/cancel redirect URLs. The default is a placeholder until the
+      real Framer site exists — Stripe checkout will still function without
+      it (payment confirmation happens via webhook, not the redirect), but
+      the post-payment redirect page won't be real until Framer is wired in.
+
+Conditions:
+  IsDev: !Equals [!Ref Environment, "dev"]
+  IsProd: !Equals [!Ref Environment, "prod"]
+  # Staging needs a stable custom domain too — not just prod. A Framer
+  # staging site needs a URL it can hardcode permanently, and the raw
+  # AWS-generated execute-api URL, while USUALLY stable across ordinary
+  # deploys, isn't something worth relying on long-term for anything
+  # externally-facing. dev deliberately stays on the raw URL — nothing
+  # external (no staging Framer clone) is ever expected to point at dev.
+  IsStagingOrProd: !Or [!Condition IsProd, !Equals [!Ref Environment, "staging"]]
+  DeployCloudFront: !And [!Condition IsProd, !Equals [!Ref EnableCloudFront, "true"]]
+  DeployCustomDomain: !And [!Condition IsStagingOrProd, !Equals [!Ref EnableCustomDomain, "true"]]
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Timeout: 30
+    MemorySize: 256
+    Environment:
+      Variables:
+        ENVIRONMENT: !Ref Environment
+        BOOKINGS_TABLE_NAME: !Ref BookingsTable
+        LEADS_TABLE_NAME: !Ref LeadsTable
+        SECURITY_TABLE_NAME: !Ref SecurityTable
+        JWT_SECRET_PATH: !Ref JwtSecret
+        ADMIN_CREDENTIALS_PATH: !Ref AdminCredentialsSecret
+        PASSWORD_PEPPER_PATH: !Ref PasswordPepperSecret
+        STRIPE_SECRET_PATH: !Ref StripeSecret
+        ADMIN_EMAIL: !Ref AdminEmail
+        NOTIFICATION_EMAIL: !Ref NotificationEmail
+        FRONTEND_BASE_URL: !Ref FrontendBaseUrl
+        LOG_LEVEL: "INFO"
+        # Deliberately forces a real diff on the Environment property
+        # itself, not some unrelated property - CloudFormation does
+        # targeted, per-property updates, not a full resource rewrite
+        # whenever ANYTHING changes. Adding Tags earlier changed Tags
+        # specifically, so CloudFormation only touched Tags - it never
+        # recognized Environment itself as different (template-to-
+        # template comparison, not template-to-live-resource), so the
+        # actual drifted/wiped live variables were never corrected. This
+        # marker guarantees every function's Environment genuinely
+        # differs from what's tracked, forcing a real, full rewrite that
+        # restores everything correctly. Safe to remove once confirmed
+        # fixed - it's not meaningful config, just a forcing mechanism.
+        DRIFT_CORRECTION_MARKER: "1"
+        EMAIL_PROVIDER: !Ref EmailProvider
+        RESEND_SECRET_PATH: !Ref ResendSecret
+
+Resources:
+
+  # -------------------------------------------------------
+  # CloudWatch Log Groups — explicit 14-day retention.
+  # Without these, Lambda auto-creates log groups with NO expiration,
+  # meaning every log line lives forever and silently accumulates storage
+  # cost. Same reasoning as fintech's log groups.
+  # -------------------------------------------------------
+  ApiLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    Properties:
+      LogGroupName: !Sub /aws/lambda/debos-boxing-api-${Environment}
+      RetentionInDays: 14
+
+  ReminderLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/debos-boxing-reminder-${Environment}
+      RetentionInDays: 14
+
+  # -------------------------------------------------------
+  # KMS Keys — one per secret category, same blast-radius-minimization
+  # pattern as fintech. Defined directly in THIS template (unlike fintech,
+  # which takes key ARNs as parameters) so the whole stack is deployable in
+  # one shot with no manual pre-provisioning step — a from-scratch client
+  # project shouldn't require a separate "create these keys by hand first"
+  # ritual before the real deploy can happen.
+  # -------------------------------------------------------
+  JwtKmsKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: !Sub "Encrypts the JWT signing secret — debos-boxing-${Environment}"
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowAccountRootFullAccess
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:aws:iam::${AWS::AccountId}:root
+            Action: "kms:*"
+            Resource: "*"
+
+  PasswordPepperKmsKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: !Sub "Encrypts the password pepper — debos-boxing-${Environment}"
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowAccountRootFullAccess
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:aws:iam::${AWS::AccountId}:root
+            Action: "kms:*"
+            Resource: "*"
+
+  StripeKmsKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: !Sub "Encrypts Stripe API key + webhook signing secret — debos-boxing-${Environment}"
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowAccountRootFullAccess
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:aws:iam::${AWS::AccountId}:root
+            Action: "kms:*"
+            Resource: "*"
+
+  ResendKmsKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: !Sub "Encrypts the Resend API key — debos-boxing-${Environment}"
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowAccountRootFullAccess
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:aws:iam::${AWS::AccountId}:root
+            Action: "kms:*"
+            Resource: "*"
+
+  AdminCredentialsKmsKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: !Sub "Encrypts the admin password hash — debos-boxing-${Environment}"
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowAccountRootFullAccess
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:aws:iam::${AWS::AccountId}:root
+            Action: "kms:*"
+            Resource: "*"
+
+  DynamoDbKmsKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: !Sub "Encrypts DynamoDB tables at rest — debos-boxing-${Environment}"
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowAccountRootFullAccess
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:aws:iam::${AWS::AccountId}:root
+            Action: "kms:*"
+            Resource: "*"
+
+  # -------------------------------------------------------
+  # Secrets Manager
+  #
+  # IMPORTANT — these three secrets are NOT all provisioned the same way:
+  #
+  #   JwtSecret & PasswordPepperSecret use GenerateSecretString below, so
+  #   CloudFormation creates a random value automatically at deploy time.
+  #   That's safe here because NEITHER of these ever needs to be a specific,
+  #   human-chosen value — they're just random strings the app reads, never
+  #   something you type in or need to remember.
+  #
+  #   AdminCredentialsSecret is DIFFERENT — it must hold a specific hash
+  #   DERIVED from a real password you choose, combined with the (randomly
+  #   generated) pepper above. CloudFormation cannot compute that hash for
+  #   you, since it depends on your SecurityService.hash_password() logic
+  #   AND a password only you know. This secret gets created here with an
+  #   empty placeholder, then you run a small script locally (once, after
+  #   deploy) to compute the real hash and push it in via
+  #   `aws secretsmanager put-secret-value` — a manual step, deliberately,
+  #   because auto-generating it would mean a machine picked the admin
+  #   password, which defeats the point of it being memorable to a person.
+  # -------------------------------------------------------
+  JwtSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub /debos-boxing/${Environment}/jwt-secret
+      Description: "JWT signing secret for admin session tokens"
+      KmsKeyId: !Ref JwtKmsKey
+      GenerateSecretString:
+        SecretStringTemplate: '{}'
+        GenerateStringKey: "secret"
+        PasswordLength: 64
+        ExcludePunctuation: false
+
+  PasswordPepperSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub /debos-boxing/${Environment}/password-pepper
+      Description: "Pepper combined with password + salt during hashing — separate KMS key from the hash itself"
+      KmsKeyId: !Ref PasswordPepperKmsKey
+      GenerateSecretString:
+        SecretStringTemplate: '{}'
+        GenerateStringKey: "pepper"
+        PasswordLength: 64
+        ExcludePunctuation: false
+
+  # StripeSecret — DIFFERENT from every secret above: neither value can be
+  # auto-generated by CloudFormation. Both the API key and the webhook
+  # signing secret come directly from Stripe's own dashboard (Developers >
+  # API keys, and Developers > Webhooks > [this endpoint] > Signing secret,
+  # AFTER the webhook endpoint URL is registered there post-deploy). This
+  # secret is created here with placeholders, then manually populated via
+  # `aws secretsmanager put-secret-value` once both real values exist —
+  # same manual-population pattern as AdminCredentialsSecret above, for the
+  # same underlying reason: some values genuinely can't be generated by
+  # infrastructure code, only supplied by a human after the fact.
+  StripeSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub /debos-boxing/${Environment}/stripe-secret
+      Description: "Stripe API key + webhook signing secret — placeholder values, MUST be set manually post-deploy (see README)"
+      KmsKeyId: !Ref StripeKmsKey
+      SecretString: '{"api_key": "PLACEHOLDER_SET_MANUALLY_AFTER_DEPLOY", "webhook_secret": "PLACEHOLDER_SET_MANUALLY_AFTER_DEPLOY"}'
+
+  ResendSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub /debos-boxing/${Environment}/resend-secret
+      Description: >
+        Resend API key — placeholder value, MUST be set manually post-deploy.
+        Temporary bridge while AWS SES production access is pending
+        reconsideration — see EmailProvider parameter below. Not used at
+        all unless EmailProvider is explicitly set to "resend".
+      KmsKeyId: !Ref ResendKmsKey
+      SecretString: '{"api_key": "PLACEHOLDER_SET_MANUALLY_AFTER_DEPLOY"}'
+
+  AdminCredentialsSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub /debos-boxing/${Environment}/admin-credentials
+      Description: "Admin password hash — placeholder value, MUST be set manually post-deploy (see README)"
+      KmsKeyId: !Ref AdminCredentialsKmsKey
+      SecretString: '{"password_hash": "PLACEHOLDER_SET_MANUALLY_AFTER_DEPLOY"}'
+
+  # -------------------------------------------------------
+  # IAM Role — shared across both Lambda functions
+  # -------------------------------------------------------
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub debos-boxing-lambda-role-${Environment}
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DebosBoxingLambdaPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # DynamoDB — scoped to exactly these three tables + their indexes
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource:
+                  - !GetAtt BookingsTable.Arn
+                  - !Sub ${BookingsTable.Arn}/index/*
+                  - !GetAtt LeadsTable.Arn
+                  - !GetAtt SecurityTable.Arn
+              # Secrets Manager — scoped to exactly these four secrets
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource:
+                  - !Ref JwtSecret
+                  - !Ref PasswordPepperSecret
+                  - !Ref AdminCredentialsSecret
+                  - !Ref StripeSecret
+                  - !Ref ResendSecret
+              # KMS — scoped to exactly the six keys this project owns, NOT
+              # a wildcard Resource: '*'. Since we control key creation in
+              # this same template, we can reference their real ARNs
+              # directly — no reason to grant broader decrypt access than
+              # that.
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:GenerateDataKey
+                Resource:
+                  - !GetAtt JwtKmsKey.Arn
+                  - !GetAtt PasswordPepperKmsKey.Arn
+                  - !GetAtt AdminCredentialsKmsKey.Arn
+                  - !GetAtt DynamoDbKmsKey.Arn
+                  - !GetAtt StripeKmsKey.Arn
+                  - !GetAtt ResendKmsKey.Arn
+              # SES — Resource: "*" here is deliberate, not a loosening of
+              # security. FROM_ADDRESS is a hardcoded constant in our own
+              # application code (ses_service.py), never user-controllable
+              # — so this Lambda can NEVER send from an arbitrary address
+              # regardless of what this IAM resource scope allows. The
+              # actual restriction lives in our code, not this policy.
+              # Narrowly scoping this to only our domain identity broke
+              # real sending while in SES sandbox mode: sandbox's
+              # authorization check also involves the RECIPIENT's
+              # identity ARN, which is unpredictable (varies per test/
+              # real client email) and can't be enumerated in advance.
+              - Effect: Allow
+                Action:
+                  - ses:SendEmail
+                  - ses:SendRawEmail
+                Resource: "*"
+
+  # -------------------------------------------------------
+  # Lambda — Main API Function
+  # -------------------------------------------------------
+  ApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub debos-boxing-api-${Environment}
+      Description: "FastAPI + Mangum handler for booking/lead endpoints"
+      CodeUri: ../package/
+      Handler: src.api.main.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Tracing: Active
+      # Overrides the 256MB global default - specifically for this
+      # function, not the whole system. Admin login runs 600,000 PBKDF2
+      # iterations (OWASP's current recommendation, deliberately
+      # expensive by design to resist brute-forcing - NOT something to
+      # weaken for speed). Lambda's CPU scales with memory, so more
+      # memory here means more CPU for that same fixed, non-negotiable
+      # computation - genuinely faster without touching security at all.
+      # Since Lambda billing is memory x duration, a roughly proportional
+      # drop in duration keeps the real cost close to flat, sometimes
+      # even lower, despite the higher memory number.
+      MemorySize: 1024
+      # Tags added deliberately here (matching every other resource in
+      # this template) - also forces CloudFormation to genuinely
+      # reprocess this function's FULL configuration on next deploy,
+      # which is needed right now to correct real environment-variable
+      # drift: a raw `aws lambda update-function-configuration` call used
+      # earlier as a stale-cache workaround unintentionally REPLACED
+      # (not merged) this function's entire Environment.Variables map,
+      # wiping out everything CloudFormation had configured except the
+      # one variable that call explicitly set. CloudFormation's own
+      # tracked template was never affected - only the live resource
+      # drifted - which is exactly why a normal deploy saw "no changes"
+      # despite the function actually being broken.
+      Tags:
+        Project: debos-boxing
+        Environment: !Ref Environment
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            RestApiId: !Ref BookingApi
+            Path: /{proxy+}
+            Method: ANY
+
+  # -------------------------------------------------------
+  # Lambda — Daily Reminder Function (EventBridge scheduled)
+  # -------------------------------------------------------
+  ReminderFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub debos-boxing-reminder-${Environment}
+      Description: "Daily scheduled job — sends 24hr session reminders via SES"
+      CodeUri: ../package/
+      Handler: src.scheduled.reminder_handler.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Tracing: Active
+      Events:
+        DailyReminder:
+          Type: Schedule
+          Properties:
+            Schedule: rate(1 day)
+            Description: "Sends reminders for tomorrow's bookings"
+
+  # -------------------------------------------------------
+  # API Gateway — Regional (not Edge-optimized). Same reasoning as fintech:
+  # this stack has its OWN CloudFront (conditionally, below) — an
+  # Edge-optimized API Gateway would put a second CloudFront in front of
+  # the first, a redundant double-CDN anti-pattern.
+  #
+  # No custom Lambda Authorizer here (unlike fintech) — admin auth is
+  # checked INSIDE the FastAPI app via the require_admin dependency
+  # already built. A single admin identity doesn't need a dedicated
+  # authorizer Lambda; that pattern earns its keep on fintech because it
+  # protects many JWT holders across a multi-tenant system, not one.
+  # -------------------------------------------------------
+  BookingApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: !Sub debos-boxing-api-${Environment}
+      StageName: !Ref Environment
+      TracingEnabled: true
+      MethodSettings:
+        - ResourcePath: '/*'
+          HttpMethod: '*'
+          ThrottlingBurstLimit: 200
+          ThrottlingRateLimit: 100
+          LoggingLevel: INFO
+          DataTraceEnabled: false
+          MetricsEnabled: true
+
+  # -------------------------------------------------------
+  # API Gateway Regional Custom Domain — works TODAY regardless of whether
+  # this AWS account has CloudFront access yet. Covers BOTH staging and
+  # prod (not just prod) — a Framer staging site needs a stable URL to
+  # point at permanently, same reasoning as prod, just a different
+  # subdomain. dev intentionally has no custom domain — nothing external
+  # is ever expected to point at dev specifically.
+  # -------------------------------------------------------
+  RegionalDomainName:
+    Type: AWS::ApiGateway::DomainName
+    Condition: DeployCustomDomain
+    Properties:
+      DomainName: !If [IsProd, "api.debosboxingandfitness.com", "staging-api.debosboxingandfitness.com"]
+      RegionalCertificateArn: !Ref RegionalCustomDomainCertArn
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+      SecurityPolicy: TLS_1_2
+
+  RegionalDomainMapping:
+    Type: AWS::ApiGateway::BasePathMapping
+    Condition: DeployCustomDomain
+    Properties:
+      DomainName: !Ref RegionalDomainName
+      RestApiId: !Ref BookingApi
+      Stage: !Ref Environment
+
+  # -------------------------------------------------------
+  # CloudFront Distribution — CONDITIONAL. Only created once
+  # EnableCloudFront is flipped to "true", which should only happen after
+  # confirming this AWS account has actually cleared CloudFront account
+  # verification. Until then, the Regional custom domain above already
+  # gives a working HTTPS custom domain with no CDN layer — CloudFront is
+  # an enhancement to add later (caching, DDoS protection via Shield), not
+  # a blocker for going live.
+  # -------------------------------------------------------
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Condition: DeployCloudFront
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: !Sub "debos-boxing-${Environment}"
+        Aliases:
+          - api.debosboxingandfitness.com
+        ViewerCertificate:
+          AcmCertificateArn: !Ref CloudFrontCertificate
+          SslSupportMethod: sni-only
+          MinimumProtocolVersion: TLSv1.2_2021
+        Origins:
+          - Id: ApiGatewayOrigin
+            DomainName: !Sub "${BookingApi}.execute-api.${AWS::Region}.amazonaws.com"
+            OriginPath: !Sub "/${Environment}"
+            CustomOriginConfig:
+              OriginProtocolPolicy: https-only
+              OriginSSLProtocols:
+                - TLSv1.2
+        DefaultCacheBehavior:
+          TargetOriginId: ApiGatewayOrigin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD, OPTIONS, PUT, PATCH, POST, DELETE]
+          CachedMethods: [GET, HEAD]
+          ForwardedValues:
+            QueryString: true
+            Headers: [Authorization, Content-Type]
+            Cookies:
+              Forward: none
+          MinTTL: 0
+          DefaultTTL: 0
+          MaxTTL: 0
+
+  CloudFrontCertificate:
+    Type: AWS::CertificateManager::Certificate
+    Condition: DeployCloudFront
+    DeletionPolicy: Retain
+    Properties:
+      DomainName: api.debosboxingandfitness.com
+      ValidationMethod: DNS
+      Tags:
+        - Key: Project
+          Value: debos-boxing-booking-platform
+
+  # -------------------------------------------------------
+  # SES Domain Identity — begins domain verification. AWS generates DKIM
+  # tokens that must be added as CNAME records at Namecheap before SES will
+  # actually allow sending from this domain — a manual DNS step,
+  # CloudFormation can kick off verification but can't complete it.
+  # -------------------------------------------------------
+  SesDomainIdentity:
+    Type: AWS::SES::EmailIdentity
+    # Only dev creates this - SES domain identities are per-DOMAIN, not
+    # per-environment. debosboxingandfitness.com was already verified as
+    # part of the dev stack; staging/prod trying to create their OWN copy
+    # of this same identity is a genuine conflict (SES rejects a second
+    # identity resource for a domain that's already registered), not
+    # something environment-scoped naming can work around. Staging/prod
+    # Lambdas can still send real email through this same verified domain
+    # regardless - their runtime ses:SendEmail permission is scoped
+    # broadly (Resource: "*"), not tied to which stack owns this
+    # CloudFormation resource.
+    Condition: IsDev
+    Properties:
+      EmailIdentity: debosboxingandfitness.com
+
+  # -------------------------------------------------------
+  # DynamoDB — Bookings Table
+  # -------------------------------------------------------
+  BookingsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub debos-boxing-bookings-${Environment}
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !Ref DynamoDbKmsKey
+      AttributeDefinitions:
+        - AttributeName: booking_id
+          AttributeType: S
+        - AttributeName: session_date
+          AttributeType: S
+        - AttributeName: session_time
+          AttributeType: S
+        - AttributeName: client_ip
+          AttributeType: S
+        - AttributeName: status
+          AttributeType: S
+      KeySchema:
+        - AttributeName: booking_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: session-date-index
+          KeySchema:
+            - AttributeName: session_date
+              KeyType: HASH
+            - AttributeName: session_time
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: client-ip-status-index
+          # Powers the one-processing-booking-per-IP check on every
+          # booking creation request — a real Query here instead of a
+          # table scan, since this runs on every single booking attempt,
+          # not an occasional admin action. Slot-claim records naturally
+          # never appear in this index at all — they don't have a
+          # client_ip attribute, and DynamoDB GSIs only index items that
+          # actually have the key attribute present.
+          KeySchema:
+            - AttributeName: client_ip
+              KeyType: HASH
+            - AttributeName: status
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      Tags:
+        - Key: Project
+          Value: debos-boxing-booking-platform
+        - Key: Environment
+          Value: !Ref Environment
+
+  # -------------------------------------------------------
+  # DynamoDB — Leads Table
+  # No GSI — leads only ever need a full scan for the (future, post-MVP)
+  # re-engagement email feature, and at gym-scale lead volume a scan is
+  # genuinely fine. Adding an index here would be solving a scale problem
+  # this project will never actually have.
+  # -------------------------------------------------------
+  LeadsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub debos-boxing-leads-${Environment}
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !Ref DynamoDbKmsKey
+      AttributeDefinitions:
+        - AttributeName: lead_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: lead_id
+          KeyType: HASH
+      Tags:
+        - Key: Project
+          Value: debos-boxing-booking-platform
+        - Key: Environment
+          Value: !Ref Environment
+
+  # -------------------------------------------------------
+  # DynamoDB — Security Table (brute-force lockout tracking ONLY — see
+  # database.py's comment on why this is single-purpose, not a general
+  # cache table)
+  # -------------------------------------------------------
+  SecurityTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub debos-boxing-security-${Environment}
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !Ref DynamoDbKmsKey
+      AttributeDefinitions:
+        - AttributeName: security_key
+          AttributeType: S
+      KeySchema:
+        - AttributeName: security_key
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: expires_at
+        Enabled: true
+      Tags:
+        - Key: Project
+          Value: debos-boxing-booking-platform
+        - Key: Environment
+          Value: !Ref Environment
+
+  # -------------------------------------------------------
+  # CloudWatch — Billing Alarm, same $10 pattern as fintech
+  # -------------------------------------------------------
+  BillingAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub debos-boxing-billing-alarm-${Environment}
+      AlarmDescription: Alert when AWS charges exceed $10
+      MetricName: EstimatedCharges
+      Namespace: AWS/Billing
+      Statistic: Maximum
+      Period: 86400
+      EvaluationPeriods: 1
+      Threshold: 10
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: Currency
+          Value: USD
+
+Outputs:
+  ApiUrl:
+    Value: !Sub https://${BookingApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}
+    Export:
+      Name: !Sub debos-boxing-api-url-${Environment}
+
+  RegionalDomainTarget:
+    Condition: DeployCustomDomain
+    Description: "Add this as a CNAME record at Namecheap for api.debosboxingandfitness.com"
+    Value: !GetAtt RegionalDomainName.RegionalDomainName
+    Export:
+      Name: !Sub debos-boxing-regional-domain-target-${Environment}
+
+  BookingsTableName:
+    Value: !Ref BookingsTable
+    Export:
+      Name: !Sub debos-boxing-bookings-table-${Environment}
+
+  LeadsTableName:
+    Value: !Ref LeadsTable
+    Export:
+      Name: !Sub debos-boxing-leads-table-${Environment}
+
+  SesVerificationNote:
+    Description: "Check AWS SES console for the DKIM CNAME records to add at Namecheap"
+    Value: "See SES console > Verified identities > debosboxingandfitness.com > DKIM"
+
+  CloudFrontCertificateArn:
+    Condition: DeployCloudFront
+    Value: !Ref CloudFrontCertificate
+    Export:
+      Name: !Sub debos-boxing-cloudfront-cert-arn-${Environment}

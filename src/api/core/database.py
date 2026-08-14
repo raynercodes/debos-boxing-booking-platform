@@ -1,46 +1,70 @@
+"""
+DynamoDB access layer.
+
+DynamoDBService is a singleton — get_db_service() always returns the same
+instance within a single Lambda execution context, so table connections and
+resource clients persist across warm invocations exactly like the old
+module-level globals did. The difference is the state now lives inside an
+object with a clear interface, instead of scattered module-level variables.
+"""
+
 import os
+from typing import Optional
+
 import boto3
 
-# Outside handler — cached in Lambda execution context (L1), persists across warm invocations
-# NOTE: if tests ever mock DynamoDB (moto), reset ALL THREE globals together in a fixture —
-# resetting only the table singletons while _dynamodb stays stale caused a real bug on the
-# fintech project (module-level resource wasn't reset alongside the table objects).
-_dynamodb = None
-_bookings_table = None
-_leads_table = None
-_security_table = None
+
+class DynamoDBService:
+    """Lazily-initialized DynamoDB table access, cached for the life of this
+    Lambda execution context (L1 cache — dies with the container, persists
+    across warm invocations)."""
+
+    def __init__(self) -> None:
+        self._resource = None
+        self._bookings_table = None
+        self._leads_table = None
+        self._security_table = None
+
+    @property
+    def resource(self):
+        if self._resource is None:
+            self._resource = boto3.resource("dynamodb")
+        return self._resource
+
+    @property
+    def bookings_table(self):
+        if self._bookings_table is None:
+            table_name = os.environ["BOOKINGS_TABLE_NAME"]
+            self._bookings_table = self.resource.Table(table_name)
+        return self._bookings_table
+
+    @property
+    def leads_table(self):
+        if self._leads_table is None:
+            table_name = os.environ["LEADS_TABLE_NAME"]
+            self._leads_table = self.resource.Table(table_name)
+        return self._leads_table
+
+    @property
+    def security_table(self):
+        """Small dedicated table — brute force lockout tracking only. Not a
+        general cache table like fintech's, because this project doesn't need
+        L2 caching at gym scale. Single-purpose and named accordingly avoids
+        scope creep into a cache layer nothing here needs yet."""
+        if self._security_table is None:
+            table_name = os.environ["SECURITY_TABLE_NAME"]
+            self._security_table = self.resource.Table(table_name)
+        return self._security_table
 
 
-def _get_dynamodb():
-    global _dynamodb
-    if _dynamodb is None:
-        _dynamodb = boto3.resource("dynamodb")
-    return _dynamodb
+_db_service: Optional[DynamoDBService] = None
 
 
-def get_bookings_table():
-    global _bookings_table
-    if _bookings_table is None:
-        table_name = os.environ["BOOKINGS_TABLE_NAME"]
-        _bookings_table = _get_dynamodb().Table(table_name)
-    return _bookings_table
-
-
-def get_leads_table():
-    global _leads_table
-    if _leads_table is None:
-        table_name = os.environ["LEADS_TABLE_NAME"]
-        _leads_table = _get_dynamodb().Table(table_name)
-    return _leads_table
-
-
-def get_security_table():
-    """Small dedicated table — brute force lockout tracking only.
-    Not a general cache table like fintech's, because this project doesn't
-    need L2 caching at gym scale. Keeping it single-purpose and named
-    accordingly avoids scope creep into a cache layer nothing here needs yet."""
-    global _security_table
-    if _security_table is None:
-        table_name = os.environ["SECURITY_TABLE_NAME"]
-        _security_table = _get_dynamodb().Table(table_name)
-    return _security_table
+def get_db_service() -> DynamoDBService:
+    """Module-level singleton accessor. Only one DynamoDBService instance
+    exists per Lambda execution context — this function just hands back
+    the same one every time it's called within that context."""
+    global _db_service
+    if _db_service is None:
+        _db_service = DynamoDBService()
+    return _db_service

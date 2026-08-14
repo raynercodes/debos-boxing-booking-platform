@@ -1,0 +1,511 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [dev]
+  # Staging/prod are DELIBERATELY separate from the automatic dev push
+  # trigger - promoting to staging or prod is a real decision, not
+  # something that should silently run (and leave a changeset sitting
+  # around needing manual rejection) every single time dev gets a push.
+  # Triggered manually via the "Run workflow" button (or `gh workflow run`),
+  # choosing exactly which ONE environment to target.
+  workflow_dispatch:
+    inputs:
+      target_environment:
+        description: 'Environment to deploy (staging or prod promotion only - dev deploys automatically on every push to dev, never needs this)'
+        required: true
+        type: choice
+        options:
+          - staging
+          - prod
+      email_provider:
+        description: 'Temporary SES/Resend bridge - leave as ses unless actively switching due to pending SES production access. Only meaningful for prod (staging always uses SES test-mode regardless).'
+        required: false
+        type: choice
+        default: ses
+        options:
+          - ses
+          - resend
+
+permissions:
+  id-token: write   # required for OIDC — lets this workflow request an AWS credential
+  contents: read
+
+jobs:
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt -r requirements-dev.txt
+      - run: pytest tests/ -v
+
+  build:
+    runs-on: ubuntu-latest
+    needs: test
+    outputs:
+      app_version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compute version string
+        id: version
+        run: |
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          VERSION="1.0.${{ github.run_number }}+${SHORT_SHA}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install aws-sam-cli
+      - name: Prepare package directory
+        run: |
+          rm -rf package
+          mkdir package
+          cp -r src ./package/
+          cp requirements.txt ./package/
+          ls -la package/
+      - run: sam build --template infrastructure/template.yaml --no-cached
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::331191957820:role/debos-boxing-github-actions-role
+          aws-region: us-east-1
+      - name: Determine target artifacts bucket
+        id: bucket
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            TARGET="${{ inputs.target_environment }}"
+          else
+            TARGET="dev"
+          fi
+          echo "name=debos-boxing-artifacts-${TARGET}-331191957820" >> "$GITHUB_OUTPUT"
+      - run: sam package --s3-bucket ${{ steps.bucket.outputs.name }} --output-template-file packaged-template.yaml
+      - uses: actions/upload-artifact@v4
+        with:
+          name: packaged-template
+          path: packaged-template.yaml
+
+  # ============================================================
+  # DEV — unchanged, automatic on every push, no approval gate.
+  # This is the fast path this question was actually about.
+  # ============================================================
+  plan-dev:
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.event_name == 'push'
+    outputs:
+      changeset_type: ${{ steps.changeset-type.outputs.type }}
+      has_changes: ${{ steps.create-changeset.outputs.has_changes }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: packaged-template
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::331191957820:role/debos-boxing-github-actions-role
+          aws-region: us-east-1
+      - name: Determine changeset type (handles deleted/stub stacks correctly)
+        id: changeset-type
+        run: |
+          STACK_STATUS=$(aws cloudformation describe-stacks --stack-name debos-boxing-booking-platform-dev --region us-east-1 --query "Stacks[0].StackStatus" --output text 2>/dev/null || echo "NOT_FOUND")
+          if [ "$STACK_STATUS" == "NOT_FOUND" ] || [ "$STACK_STATUS" == "DELETE_COMPLETE" ] || [ "$STACK_STATUS" == "REVIEW_IN_PROGRESS" ] || [ "$STACK_STATUS" == "ROLLBACK_COMPLETE" ]; then
+            echo "type=CREATE" >> "$GITHUB_OUTPUT"
+          else
+            echo "type=UPDATE" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Create changeset (does NOT execute anything yet)
+        id: create-changeset
+        run: |
+          aws cloudformation create-change-set \
+            --stack-name debos-boxing-booking-platform-dev \
+            --change-set-name gha-${{ github.run_id }} \
+            --change-set-type ${{ steps.changeset-type.outputs.type }} \
+            --template-body file://packaged-template.yaml \
+            --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
+            --parameters \
+              ParameterKey=Environment,ParameterValue=dev \
+              ParameterKey=EnableCloudFront,ParameterValue=false \
+              ParameterKey=AdminEmail,ParameterValue=${{ secrets.ADMIN_EMAIL }} \
+              ParameterKey=NotificationEmail,ParameterValue=debosboxingandfitness@gmail.com \
+              ParameterKey=FrontendBaseUrl,ParameterValue=https://debosboxingandfitness.com \
+            --region us-east-1
+          aws cloudformation wait change-set-create-complete \
+            --stack-name debos-boxing-booking-platform-dev \
+            --change-set-name gha-${{ github.run_id }} \
+            --region us-east-1 || true
+
+          STATUS=$(aws cloudformation describe-change-set --stack-name debos-boxing-booking-platform-dev --change-set-name gha-${{ github.run_id }} --region us-east-1 --query "Status" --output text)
+          REASON=$(aws cloudformation describe-change-set --stack-name debos-boxing-booking-platform-dev --change-set-name gha-${{ github.run_id }} --region us-east-1 --query "StatusReason" --output text)
+
+          if [ "$STATUS" == "FAILED" ]; then
+            if [[ "$REASON" == *"didn't contain changes"* ]] || [[ "$REASON" == *"No updates are to be performed"* ]]; then
+              echo "No changes detected — dev already matches this template. Nothing to deploy."
+              echo "has_changes=false" >> "$GITHUB_OUTPUT"
+              aws cloudformation delete-change-set --stack-name debos-boxing-booking-platform-dev --change-set-name gha-${{ github.run_id }} --region us-east-1
+            else
+              echo "Changeset genuinely failed: $REASON"
+              exit 1
+            fi
+          else
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Print the actual plan — this is the real diff about to be applied
+        if: steps.create-changeset.outputs.has_changes == 'true'
+        run: |
+          aws cloudformation describe-change-set \
+            --stack-name debos-boxing-booking-platform-dev \
+            --change-set-name gha-${{ github.run_id }} \
+            --region us-east-1 \
+            --query "Changes[].{Action:ResourceChange.Action,Resource:ResourceChange.LogicalResourceId,Type:ResourceChange.ResourceType,Replacement:ResourceChange.Replacement}" \
+            --output table
+      - name: Clean up failed changeset (only if changeset CREATION itself failed)
+        # Scoped to the create-changeset step specifically, not the broader
+        # job-level failure() - that broader condition would also fire (and
+        # wrongly delete a perfectly good, ready-to-execute changeset) if
+        # some LATER, unrelated read-only step happened to fail after
+        # changeset creation already succeeded. This only deletes a
+        # changeset that never successfully came into existence in the
+        # first place.
+        if: steps.create-changeset.outcome == 'failure'
+        run: |
+          aws cloudformation delete-change-set \
+            --stack-name debos-boxing-booking-platform-dev \
+            --change-set-name gha-${{ github.run_id }} \
+            --region us-east-1 || true
+
+  deploy-dev:
+    runs-on: ubuntu-latest
+    needs: [plan-dev, build]
+    if: github.event_name == 'push' && success()
+    steps:
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::331191957820:role/debos-boxing-github-actions-role
+          aws-region: us-east-1
+      - name: Execute changeset (only if there are real changes to apply)
+        if: needs.plan-dev.outputs.has_changes == 'true'
+        run: |
+          EXEC_STATUS=$(aws cloudformation describe-change-set \
+            --stack-name debos-boxing-booking-platform-dev \
+            --change-set-name gha-${{ github.run_id }} \
+            --region us-east-1 \
+            --query "ExecutionStatus" --output text)
+
+          if [ "$EXEC_STATUS" == "EXECUTE_COMPLETE" ]; then
+            echo "This changeset already executed successfully — likely a duplicate job dispatch. Dev is already up to date, nothing more to do."
+          else
+            aws cloudformation execute-change-set \
+              --stack-name debos-boxing-booking-platform-dev \
+              --change-set-name gha-${{ github.run_id }} \
+              --region us-east-1
+
+            if [ "${{ needs.plan-dev.outputs.changeset_type }}" == "CREATE" ]; then
+              aws cloudformation wait stack-create-complete --stack-name debos-boxing-booking-platform-dev --region us-east-1
+            else
+              aws cloudformation wait stack-update-complete --stack-name debos-boxing-booking-platform-dev --region us-east-1
+            fi
+          fi
+      - name: No changes to deploy
+        if: needs.plan-dev.outputs.has_changes != 'true'
+        run: echo "Dev already matches this template — nothing to deploy this run."
+      - name: Publish version to SSM Parameter Store
+        run: |
+          aws ssm put-parameter \
+            --name "/debos-boxing/dev/app-version" \
+            --value "${{ needs.build.outputs.app_version }}" \
+            --type String \
+            --overwrite \
+            --region us-east-1
+      - name: Print live stack URL
+        run: |
+          URL=$(aws cloudformation describe-stacks --stack-name debos-boxing-booking-platform-dev --region us-east-1 --query "Stacks[0].Outputs[?OutputKey=='ApiUrl'].OutputValue" --output text)
+          echo "Dev API is live at: $URL/health"
+          echo "Docs: $URL/docs"
+
+  # ============================================================
+  # STAGING — ONLY runs on a manual workflow_dispatch with
+  # target_environment == staging. Never a side effect of a
+  # normal dev push.
+  # ============================================================
+  plan-staging:
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.event_name == 'workflow_dispatch' && inputs.target_environment == 'staging'
+    outputs:
+      changeset_type: ${{ steps.changeset-type.outputs.type }}
+      has_changes: ${{ steps.create-changeset.outputs.has_changes }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: packaged-template
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::331191957820:role/debos-boxing-github-actions-role
+          aws-region: us-east-1
+      - name: Determine changeset type (handles deleted/stub stacks correctly)
+        id: changeset-type
+        run: |
+          STACK_STATUS=$(aws cloudformation describe-stacks --stack-name debos-boxing-booking-platform-staging --region us-east-1 --query "Stacks[0].StackStatus" --output text 2>/dev/null || echo "NOT_FOUND")
+          if [ "$STACK_STATUS" == "NOT_FOUND" ] || [ "$STACK_STATUS" == "DELETE_COMPLETE" ] || [ "$STACK_STATUS" == "REVIEW_IN_PROGRESS" ] || [ "$STACK_STATUS" == "ROLLBACK_COMPLETE" ]; then
+            echo "type=CREATE" >> "$GITHUB_OUTPUT"
+          else
+            echo "type=UPDATE" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Create changeset (does NOT execute anything yet)
+        id: create-changeset
+        run: |
+          aws cloudformation create-change-set \
+            --stack-name debos-boxing-booking-platform-staging \
+            --change-set-name gha-${{ github.run_id }} \
+            --change-set-type ${{ steps.changeset-type.outputs.type }} \
+            --template-body file://packaged-template.yaml \
+            --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
+            --parameters \
+              ParameterKey=Environment,ParameterValue=staging \
+              ParameterKey=EnableCloudFront,ParameterValue=false \
+              ParameterKey=EnableCustomDomain,ParameterValue=true \
+              ParameterKey=AdminEmail,ParameterValue=${{ secrets.ADMIN_EMAIL }} \
+              ParameterKey=NotificationEmail,ParameterValue=debosboxingandfitness@gmail.com \
+              ParameterKey=FrontendBaseUrl,ParameterValue=https://debosboxingandfitness.com \
+              ParameterKey=RegionalCustomDomainCertArn,ParameterValue=arn:aws:acm:us-east-1:331191957820:certificate/8a256ae7-d031-4834-a1d3-8b15b8bfe0e0 \
+              ParameterKey=EmailProvider,ParameterValue=${{ inputs.email_provider }} \
+            --region us-east-1
+          aws cloudformation wait change-set-create-complete \
+            --stack-name debos-boxing-booking-platform-staging \
+            --change-set-name gha-${{ github.run_id }} \
+            --region us-east-1 || true
+
+          STATUS=$(aws cloudformation describe-change-set --stack-name debos-boxing-booking-platform-staging --change-set-name gha-${{ github.run_id }} --region us-east-1 --query "Status" --output text)
+          REASON=$(aws cloudformation describe-change-set --stack-name debos-boxing-booking-platform-staging --change-set-name gha-${{ github.run_id }} --region us-east-1 --query "StatusReason" --output text)
+
+          if [ "$STATUS" == "FAILED" ]; then
+            if [[ "$REASON" == *"didn't contain changes"* ]] || [[ "$REASON" == *"No updates are to be performed"* ]]; then
+              echo "No changes detected — staging already matches this template. Nothing to deploy."
+              echo "has_changes=false" >> "$GITHUB_OUTPUT"
+              aws cloudformation delete-change-set --stack-name debos-boxing-booking-platform-staging --change-set-name gha-${{ github.run_id }} --region us-east-1
+            else
+              echo "Changeset genuinely failed: $REASON"
+              exit 1
+            fi
+          else
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Print the actual plan — this is the real diff about to be applied
+        if: steps.create-changeset.outputs.has_changes == 'true'
+        run: |
+          aws cloudformation describe-change-set \
+            --stack-name debos-boxing-booking-platform-staging \
+            --change-set-name gha-${{ github.run_id }} \
+            --region us-east-1 \
+            --query "Changes[].{Action:ResourceChange.Action,Resource:ResourceChange.LogicalResourceId,Type:ResourceChange.ResourceType,Replacement:ResourceChange.Replacement}" \
+            --output table
+      - name: Clean up failed changeset (only if changeset CREATION itself failed)
+        # Scoped to the create-changeset step specifically, not the broader
+        # job-level failure() - that broader condition would also fire (and
+        # wrongly delete a perfectly good, ready-to-execute changeset) if
+        # some LATER, unrelated read-only step happened to fail after
+        # changeset creation already succeeded. This only deletes a
+        # changeset that never successfully came into existence in the
+        # first place.
+        if: steps.create-changeset.outcome == 'failure'
+        run: |
+          aws cloudformation delete-change-set \
+            --stack-name debos-boxing-booking-platform-staging \
+            --change-set-name gha-${{ github.run_id }} \
+            --region us-east-1 || true
+
+  deploy-staging:
+    runs-on: ubuntu-latest
+    needs: [plan-staging, build]
+    if: github.event_name == 'workflow_dispatch' && inputs.target_environment == 'staging' && success()
+    environment: staging   # <- pauses for GitHub Environment approval, once configured in repo Settings
+    steps:
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::331191957820:role/debos-boxing-github-actions-role
+          aws-region: us-east-1
+      - name: Execute changeset (only if there are real changes to apply)
+        if: needs.plan-staging.outputs.has_changes == 'true'
+        run: |
+          EXEC_STATUS=$(aws cloudformation describe-change-set \
+            --stack-name debos-boxing-booking-platform-staging \
+            --change-set-name gha-${{ github.run_id }} \
+            --region us-east-1 \
+            --query "ExecutionStatus" --output text)
+
+          if [ "$EXEC_STATUS" == "EXECUTE_COMPLETE" ]; then
+            echo "This changeset already executed successfully — likely a duplicate job dispatch. Staging is already up to date, nothing more to do."
+          else
+            aws cloudformation execute-change-set \
+              --stack-name debos-boxing-booking-platform-staging \
+              --change-set-name gha-${{ github.run_id }} \
+              --region us-east-1
+
+            if [ "${{ needs.plan-staging.outputs.changeset_type }}" == "CREATE" ]; then
+              aws cloudformation wait stack-create-complete --stack-name debos-boxing-booking-platform-staging --region us-east-1
+            else
+              aws cloudformation wait stack-update-complete --stack-name debos-boxing-booking-platform-staging --region us-east-1
+            fi
+          fi
+      - name: No changes to deploy
+        if: needs.plan-staging.outputs.has_changes != 'true'
+        run: echo "Staging already matches this template — nothing to deploy this run."
+      - name: Publish version to SSM Parameter Store
+        run: |
+          aws ssm put-parameter \
+            --name "/debos-boxing/staging/app-version" \
+            --value "${{ needs.build.outputs.app_version }}" \
+            --type String \
+            --overwrite \
+            --region us-east-1
+      - name: Print live stack URL
+        run: |
+          echo "Staging API is live at: https://staging-api.debosboxingandfitness.com/health"
+
+  # ============================================================
+  # PROD — ONLY runs on a manual workflow_dispatch with
+  # target_environment == prod. Same isolation as staging.
+  # ============================================================
+  plan-prod:
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.event_name == 'workflow_dispatch' && inputs.target_environment == 'prod'
+    outputs:
+      changeset_type: ${{ steps.changeset-type.outputs.type }}
+      has_changes: ${{ steps.create-changeset.outputs.has_changes }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: packaged-template
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::331191957820:role/debos-boxing-github-actions-role
+          aws-region: us-east-1
+      - name: Determine changeset type (handles deleted/stub stacks correctly)
+        id: changeset-type
+        run: |
+          STACK_STATUS=$(aws cloudformation describe-stacks --stack-name debos-boxing-booking-platform-prod --region us-east-1 --query "Stacks[0].StackStatus" --output text 2>/dev/null || echo "NOT_FOUND")
+          if [ "$STACK_STATUS" == "NOT_FOUND" ] || [ "$STACK_STATUS" == "DELETE_COMPLETE" ] || [ "$STACK_STATUS" == "REVIEW_IN_PROGRESS" ] || [ "$STACK_STATUS" == "ROLLBACK_COMPLETE" ]; then
+            echo "type=CREATE" >> "$GITHUB_OUTPUT"
+          else
+            echo "type=UPDATE" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Create changeset (does NOT execute anything yet)
+        id: create-changeset
+        run: |
+          aws cloudformation create-change-set \
+            --stack-name debos-boxing-booking-platform-prod \
+            --change-set-name gha-${{ github.run_id }} \
+            --change-set-type ${{ steps.changeset-type.outputs.type }} \
+            --template-body file://packaged-template.yaml \
+            --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
+            --parameters \
+              ParameterKey=Environment,ParameterValue=prod \
+              ParameterKey=EnableCloudFront,ParameterValue=false \
+              ParameterKey=EnableCustomDomain,ParameterValue=true \
+              ParameterKey=AdminEmail,ParameterValue=${{ secrets.ADMIN_EMAIL }} \
+              ParameterKey=NotificationEmail,ParameterValue=debosboxingandfitness@gmail.com \
+              ParameterKey=FrontendBaseUrl,ParameterValue=https://debosboxingandfitness.com \
+              ParameterKey=RegionalCustomDomainCertArn,ParameterValue=arn:aws:acm:us-east-1:331191957820:certificate/8a256ae7-d031-4834-a1d3-8b15b8bfe0e0 \
+              ParameterKey=EmailProvider,ParameterValue=${{ inputs.email_provider }} \
+            --region us-east-1
+          aws cloudformation wait change-set-create-complete \
+            --stack-name debos-boxing-booking-platform-prod \
+            --change-set-name gha-${{ github.run_id }} \
+            --region us-east-1 || true
+
+          STATUS=$(aws cloudformation describe-change-set --stack-name debos-boxing-booking-platform-prod --change-set-name gha-${{ github.run_id }} --region us-east-1 --query "Status" --output text)
+          REASON=$(aws cloudformation describe-change-set --stack-name debos-boxing-booking-platform-prod --change-set-name gha-${{ github.run_id }} --region us-east-1 --query "StatusReason" --output text)
+
+          if [ "$STATUS" == "FAILED" ]; then
+            if [[ "$REASON" == *"didn't contain changes"* ]] || [[ "$REASON" == *"No updates are to be performed"* ]]; then
+              echo "No changes detected — prod already matches this template. Nothing to deploy."
+              echo "has_changes=false" >> "$GITHUB_OUTPUT"
+              aws cloudformation delete-change-set --stack-name debos-boxing-booking-platform-prod --change-set-name gha-${{ github.run_id }} --region us-east-1
+            else
+              echo "Changeset genuinely failed: $REASON"
+              exit 1
+            fi
+          else
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Print the actual plan — this is the real diff about to be applied
+        if: steps.create-changeset.outputs.has_changes == 'true'
+        run: |
+          aws cloudformation describe-change-set \
+            --stack-name debos-boxing-booking-platform-prod \
+            --change-set-name gha-${{ github.run_id }} \
+            --region us-east-1 \
+            --query "Changes[].{Action:ResourceChange.Action,Resource:ResourceChange.LogicalResourceId,Type:ResourceChange.ResourceType,Replacement:ResourceChange.Replacement}" \
+            --output table
+      - name: Clean up failed changeset (only if changeset CREATION itself failed)
+        # Scoped to the create-changeset step specifically, not the broader
+        # job-level failure() - that broader condition would also fire (and
+        # wrongly delete a perfectly good, ready-to-execute changeset) if
+        # some LATER, unrelated read-only step happened to fail after
+        # changeset creation already succeeded. This only deletes a
+        # changeset that never successfully came into existence in the
+        # first place.
+        if: steps.create-changeset.outcome == 'failure'
+        run: |
+          aws cloudformation delete-change-set \
+            --stack-name debos-boxing-booking-platform-prod \
+            --change-set-name gha-${{ github.run_id }} \
+            --region us-east-1 || true
+
+  deploy-prod:
+    runs-on: ubuntu-latest
+    needs: [plan-prod, build]
+    if: github.event_name == 'workflow_dispatch' && inputs.target_environment == 'prod' && success()
+    environment: production   # <- pauses for GitHub Environment approval, once configured in repo Settings
+    steps:
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::331191957820:role/debos-boxing-github-actions-role
+          aws-region: us-east-1
+      - name: Execute changeset (only if there are real changes to apply)
+        if: needs.plan-prod.outputs.has_changes == 'true'
+        run: |
+          EXEC_STATUS=$(aws cloudformation describe-change-set \
+            --stack-name debos-boxing-booking-platform-prod \
+            --change-set-name gha-${{ github.run_id }} \
+            --region us-east-1 \
+            --query "ExecutionStatus" --output text)
+
+          if [ "$EXEC_STATUS" == "EXECUTE_COMPLETE" ]; then
+            echo "This changeset already executed successfully — likely a duplicate job dispatch. Prod is already up to date, nothing more to do."
+          else
+            aws cloudformation execute-change-set \
+              --stack-name debos-boxing-booking-platform-prod \
+              --change-set-name gha-${{ github.run_id }} \
+              --region us-east-1
+
+            if [ "${{ needs.plan-prod.outputs.changeset_type }}" == "CREATE" ]; then
+              aws cloudformation wait stack-create-complete --stack-name debos-boxing-booking-platform-prod --region us-east-1
+            else
+              aws cloudformation wait stack-update-complete --stack-name debos-boxing-booking-platform-prod --region us-east-1
+            fi
+          fi
+      - name: No changes to deploy
+        if: needs.plan-prod.outputs.has_changes != 'true'
+        run: echo "Prod already matches this template — nothing to deploy this run."
+      - name: Publish version to SSM Parameter Store
+        run: |
+          aws ssm put-parameter \
+            --name "/debos-boxing/prod/app-version" \
+            --value "${{ needs.build.outputs.app_version }}" \
+            --type String \
+            --overwrite \
+            --region us-east-1
+      - name: Print live stack URL
+        run: |
+          echo "Prod API is live at: https://api.debosboxingandfitness.com/health"

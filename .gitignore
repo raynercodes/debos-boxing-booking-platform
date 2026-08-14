@@ -10,3 +10,11 @@ package/*
 *.egg-info/
 .DS_Store
 samconfig.toml
+*.sh
+*_update.sh
+setup_repo.sh
+*fix.sh
+*trust_policy.json
+*-iam-policy.json
+*-deploy-policy.json
+github_actions_trust_policy.json

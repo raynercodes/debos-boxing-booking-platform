@@ -4,9 +4,16 @@ Admin authentication — JWT issuance/verification and password hashing.
 Scoped down from fintech's multi-tenant auth pattern on purpose: there is
 exactly one admin identity here, not a user table, so there's no separate
 pepper-per-user or refresh token rotation. There IS still a dedicated pepper
-secret (separate from the password hash and the JWT secret, each with its
-own KMS key) — that part matters regardless of how many admins exist, since
-it protects against a leaked hash+salt pair alone being crackable.
+secret (separate from the password hash and the JWT secret) — that part
+matters regardless of how many admins exist, since it protects against a
+leaked hash+salt pair alone being crackable.
+
+MIGRATED from Secrets Manager (+ per-secret KMS keys) to SSM Parameter
+Store, encrypted with the free AWS-managed aws/ssm key — a single low-
+traffic gym app doesn't need dedicated customer-managed keys per secret;
+see infrastructure/template.yaml for the full cost/security reasoning.
+Values are still stored as JSON strings (unchanged format), just fetched
+via a different AWS API now.
 """
 
 import base64
@@ -30,8 +37,8 @@ logger = get_logger(__name__)
 
 class SecurityService:
     """Singleton, same reasoning as DynamoDBService — secrets are fetched
-    from Secrets Manager once per cold start and cached for the life of the
-    execution context (L1 cache)."""
+    from SSM Parameter Store once per cold start and cached for the life
+    of the execution context (L1 cache)."""
 
     JWT_ALGORITHM = "HS256"
     JWT_EXPIRY_SECONDS = 3600  # 1 hour — admin sessions, not customer-facing, longer is fine
@@ -39,32 +46,32 @@ class SecurityService:
     SALT_BYTES = 32
 
     def __init__(self) -> None:
-        self._secrets_client = None
+        self._ssm_client = None
         self._jwt_secret: Optional[str] = None
         self._admin_password_hash: Optional[str] = None
         self._password_pepper: Optional[str] = None
 
     @property
-    def secrets_client(self):
-        if self._secrets_client is None:
-            self._secrets_client = boto3.client("secretsmanager")
-        return self._secrets_client
+    def ssm_client(self):
+        if self._ssm_client is None:
+            self._ssm_client = boto3.client("ssm")
+        return self._ssm_client
 
-    def _fetch_secret(self, secret_id: str) -> dict:
-        """Wraps the actual AWS call. If Secrets Manager is unreachable, the
-        secret doesn't exist, or the Lambda's IAM role is missing permission,
-        we log the FULL error here (table/secret names, AWS error codes —
-        useful for debugging in CloudWatch) but only ever raise the generic
+    def _fetch_secret(self, parameter_name: str) -> dict:
+        """Wraps the actual AWS call. If SSM is unreachable, the parameter
+        doesn't exist, or the Lambda's IAM role is missing permission, we
+        log the FULL error here (parameter names, AWS error codes — useful
+        for debugging in CloudWatch) but only ever raise the generic
         ExternalServiceError upward. A client hitting a broken deploy should
         see 'something went wrong', never 'AccessDeniedException: user
         arn:aws:iam::123456789:role/... is not authorized to perform:
-        secretsmanager:GetSecretValue on resource: ...' — that string alone
-        would hand an attacker your account ID and role name for free."""
+        ssm:GetParameter on resource: ...' — that string alone would hand
+        an attacker your account ID and role name for free."""
         try:
-            response = self.secrets_client.get_secret_value(SecretId=secret_id)
-            return json.loads(response["SecretString"])
+            response = self.ssm_client.get_parameter(Name=parameter_name, WithDecryption=True)
+            return json.loads(response["Parameter"]["Value"])
         except (ClientError, BotoCoreError) as exc:
-            logger.error("Failed to fetch secret '%s': %s", secret_id, exc, exc_info=True)
+            logger.error("Failed to fetch parameter '%s': %s", parameter_name, exc, exc_info=True)
             raise ExternalServiceError("Unable to retrieve required configuration") from exc
 
     @property
@@ -84,10 +91,9 @@ class SecurityService:
 
     @property
     def password_pepper(self) -> str:
-        """Dedicated secret, separate KMS key from the JWT secret and admin
-        hash — same blast-radius-minimization pattern as fintech. A pepper
-        compromised together with the password hash defeats the purpose of
-        having one, so it lives in its own Secrets Manager path."""
+        """Dedicated parameter, separate from the JWT secret and admin
+        hash. A pepper compromised together with the password hash defeats
+        the purpose of having one, so it lives in its own SSM path."""
         if self._password_pepper is None:
             secret_path = os.environ["PASSWORD_PEPPER_PATH"]
             self._password_pepper = self._fetch_secret(secret_path)["pepper"]
@@ -129,11 +135,9 @@ class SecurityService:
     def require_admin_token(self, token: str) -> None:
         """Raises InvalidTokenError if the token doesn't verify. Used by the
         FastAPI dependency in routes/bookings.py to keep the route decorator
-        clean and translate to a 401 via the global exception handler."""
+        clean and translate to a 401 via the global exception handler in
+        main.py."""
         if not self.verify_jwt(token):
-            # Logged at WARNING, not ERROR — an invalid token on its own isn't
-            # necessarily an attack (could just be an expired session), but a
-            # pattern of these in CloudWatch is worth being able to spot.
             logger.warning("Rejected invalid or expired admin token")
             raise InvalidTokenError("Invalid or expired admin token")
 

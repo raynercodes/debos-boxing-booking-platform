@@ -14,6 +14,11 @@ Two responsibilities, both security-sensitive in different ways:
    only Stripe and we know; verifying that signature is what proves a
    webhook call genuinely came from Stripe and wasn't forged by someone who
    just POSTed a fake "payment succeeded" body at our endpoint.
+
+MIGRATED from Secrets Manager to SSM Parameter Store (see security.py's
+module docstring for the full cost/security reasoning) — values are still
+stored as the same JSON string format, just fetched via a different AWS
+API now.
 """
 
 import json
@@ -32,22 +37,22 @@ logger = get_logger(__name__)
 
 class StripeService:
     def __init__(self) -> None:
-        self._secrets_client = None
+        self._ssm_client = None
         self._api_key: Optional[str] = None
         self._webhook_secret: Optional[str] = None
 
     @property
-    def secrets_client(self):
-        if self._secrets_client is None:
-            self._secrets_client = boto3.client("secretsmanager")
-        return self._secrets_client
+    def ssm_client(self):
+        if self._ssm_client is None:
+            self._ssm_client = boto3.client("ssm")
+        return self._ssm_client
 
-    def _fetch_secret(self, secret_id: str) -> dict:
+    def _fetch_secret(self, parameter_name: str) -> dict:
         try:
-            response = self.secrets_client.get_secret_value(SecretId=secret_id)
-            return json.loads(response["SecretString"])
+            response = self.ssm_client.get_parameter(Name=parameter_name, WithDecryption=True)
+            return json.loads(response["Parameter"]["Value"])
         except (ClientError, BotoCoreError) as exc:
-            logger.error("Failed to fetch secret '%s': %s", secret_id, exc, exc_info=True)
+            logger.error("Failed to fetch parameter '%s': %s", parameter_name, exc, exc_info=True)
             raise ExternalServiceError("Unable to retrieve required configuration") from exc
 
     @property

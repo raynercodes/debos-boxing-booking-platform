@@ -1,6 +1,7 @@
 import os
 import uuid
-from datetime import datetime, timezone, timedelta
+import calendar
+from datetime import datetime, timezone, timedelta, date
 from typing import Optional, List, Literal
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import RedirectResponse
@@ -11,7 +12,7 @@ from src.api.models.booking import (
     BookingRequest, BookingResponse, BookingCheckoutResponse, BookingStatus,
     BOOKING_TYPE_RULES, CHECKOUT_SESSION_EXPIRY_MINUTES, AVAILABLE_TIMES_BY_TYPE,
     BOOKING_TYPE_DISPLAY_NAMES, LOCATION_DETAIL_TO_BOOKING_TYPE, requires_slot_claim,
-    get_session_end_datetime, parse_session_datetime_utc,
+    get_session_end_datetime, parse_session_datetime_utc, GYM_TIMEZONE,
 )
 from src.api.core.security import get_security_service
 from src.api.core.database import get_db_service
@@ -36,6 +37,19 @@ def get_client_ip(http_request: Request) -> str:
     (TestClient itself doesn't support faking different client IPs
     directly)."""
     return http_request.client.host if http_request.client else "unknown"
+
+
+def _end_of_next_month(today: date) -> date:
+    """Per Debo's own business request: bookings should be allowed for
+    "this month and next month" only — not further out. Correctly handles
+    December -> January year rollover via calendar.monthrange, rather than
+    naive month+1 arithmetic that would break at the year boundary."""
+    if today.month == 12:
+        year, month = today.year + 1, 1
+    else:
+        year, month = today.year, today.month + 1
+    last_day = calendar.monthrange(year, month)[1]
+    return date(year, month, last_day)
 
 
 @router.get(
@@ -214,6 +228,23 @@ async def create_booking(
     if session_datetime_utc < datetime.now(timezone.utc):
         raise InvalidBookingRequestError("Session time can't be in the past.")
 
+    # Upper bound, per Debo's own business request: bookings should only
+    # be allowed for THIS calendar month and NEXT calendar month, nothing
+    # further out. Same "never trust client-side as the only enforcement"
+    # principle as the past-date check above — the frontend's date picker
+    # max attribute is purely a UI convenience, trivially bypassed by
+    # anyone calling the API directly. "This month" is evaluated in
+    # Eastern time (GYM_TIMEZONE), not server UTC — matches the same
+    # reasoning as every other date/time decision in this codebase: what
+    # counts as "this month" should reflect the gym's real calendar, not
+    # a server's internal clock.
+    today_eastern = datetime.now(timezone.utc).astimezone(GYM_TIMEZONE).date()
+    latest_bookable_date = _end_of_next_month(today_eastern)
+    if session_date_parsed.date() > latest_bookable_date:
+        raise InvalidBookingRequestError(
+            f"Sessions can only be booked through {latest_bookable_date.strftime('%B %d, %Y')}."
+        )
+
     allowed_weekdays = BOOKING_TYPE_RULES[booking_type]["allowed_weekdays"]
     if session_date_parsed.weekday() not in allowed_weekdays:
         weekday_names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
@@ -382,8 +413,8 @@ async def list_bookings(
             query_dates = [d for d in query_dates if d.weekday() == target_weekday]
 
         all_items = []
-        for date in query_dates:
-            all_items.extend(repo.query_by_date(date.isoformat()))
+        for date_val in query_dates:
+            all_items.extend(repo.query_by_date(date_val.isoformat()))
 
     # Slot-claim records share the bookings table but aren't real bookings —
     # filter them out before anything else touches this list. They're

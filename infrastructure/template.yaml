@@ -117,29 +117,17 @@ Globals:
         BOOKINGS_TABLE_NAME: !Ref BookingsTable
         LEADS_TABLE_NAME: !Ref LeadsTable
         SECURITY_TABLE_NAME: !Ref SecurityTable
-        JWT_SECRET_PATH: !Ref JwtSecret
-        ADMIN_CREDENTIALS_PATH: !Ref AdminCredentialsSecret
-        PASSWORD_PEPPER_PATH: !Ref PasswordPepperSecret
-        STRIPE_SECRET_PATH: !Ref StripeSecret
+        JWT_SECRET_PATH: !Ref JwtParameter
+        ADMIN_CREDENTIALS_PATH: !Ref AdminCredentialsParameter
+        PASSWORD_PEPPER_PATH: !Ref PasswordPepperParameter
+        STRIPE_SECRET_PATH: !Ref StripeParameter
         ADMIN_EMAIL: !Ref AdminEmail
         NOTIFICATION_EMAIL: !Ref NotificationEmail
         FRONTEND_BASE_URL: !Ref FrontendBaseUrl
         LOG_LEVEL: "INFO"
-        # Deliberately forces a real diff on the Environment property
-        # itself, not some unrelated property - CloudFormation does
-        # targeted, per-property updates, not a full resource rewrite
-        # whenever ANYTHING changes. Adding Tags earlier changed Tags
-        # specifically, so CloudFormation only touched Tags - it never
-        # recognized Environment itself as different (template-to-
-        # template comparison, not template-to-live-resource), so the
-        # actual drifted/wiped live variables were never corrected. This
-        # marker guarantees every function's Environment genuinely
-        # differs from what's tracked, forcing a real, full rewrite that
-        # restores everything correctly. Safe to remove once confirmed
-        # fixed - it's not meaningful config, just a forcing mechanism.
         DRIFT_CORRECTION_MARKER: "1"
         EMAIL_PROVIDER: !Ref EmailProvider
-        RESEND_SECRET_PATH: !Ref ResendSecret
+        RESEND_SECRET_PATH: !Ref ResendParameter
 
 Resources:
 
@@ -163,83 +151,12 @@ Resources:
       RetentionInDays: 14
 
   # -------------------------------------------------------
-  # KMS Keys — one per secret category, same blast-radius-minimization
-  # pattern as fintech. Defined directly in THIS template (unlike fintech,
-  # which takes key ARNs as parameters) so the whole stack is deployable in
-  # one shot with no manual pre-provisioning step — a from-scratch client
-  # project shouldn't require a separate "create these keys by hand first"
-  # ritual before the real deploy can happen.
+  # DynamoDB encryption key — UNCHANGED, kept separate from the secret-
+  # storage migration below. This encrypts DYNAMODB TABLES at rest, a
+  # completely different concern from Secrets Manager/SSM secret storage
+  # - table-level encryption cost/architecture was never part of the
+  # KMS+Secrets-Manager cost review that led to the migration below.
   # -------------------------------------------------------
-  JwtKmsKey:
-    Type: AWS::KMS::Key
-    Properties:
-      Description: !Sub "Encrypts the JWT signing secret — debos-boxing-${Environment}"
-      KeyPolicy:
-        Version: '2012-10-17'
-        Statement:
-          - Sid: AllowAccountRootFullAccess
-            Effect: Allow
-            Principal:
-              AWS: !Sub arn:aws:iam::${AWS::AccountId}:root
-            Action: "kms:*"
-            Resource: "*"
-
-  PasswordPepperKmsKey:
-    Type: AWS::KMS::Key
-    Properties:
-      Description: !Sub "Encrypts the password pepper — debos-boxing-${Environment}"
-      KeyPolicy:
-        Version: '2012-10-17'
-        Statement:
-          - Sid: AllowAccountRootFullAccess
-            Effect: Allow
-            Principal:
-              AWS: !Sub arn:aws:iam::${AWS::AccountId}:root
-            Action: "kms:*"
-            Resource: "*"
-
-  StripeKmsKey:
-    Type: AWS::KMS::Key
-    Properties:
-      Description: !Sub "Encrypts Stripe API key + webhook signing secret — debos-boxing-${Environment}"
-      KeyPolicy:
-        Version: '2012-10-17'
-        Statement:
-          - Sid: AllowAccountRootFullAccess
-            Effect: Allow
-            Principal:
-              AWS: !Sub arn:aws:iam::${AWS::AccountId}:root
-            Action: "kms:*"
-            Resource: "*"
-
-  ResendKmsKey:
-    Type: AWS::KMS::Key
-    Properties:
-      Description: !Sub "Encrypts the Resend API key — debos-boxing-${Environment}"
-      KeyPolicy:
-        Version: '2012-10-17'
-        Statement:
-          - Sid: AllowAccountRootFullAccess
-            Effect: Allow
-            Principal:
-              AWS: !Sub arn:aws:iam::${AWS::AccountId}:root
-            Action: "kms:*"
-            Resource: "*"
-
-  AdminCredentialsKmsKey:
-    Type: AWS::KMS::Key
-    Properties:
-      Description: !Sub "Encrypts the admin password hash — debos-boxing-${Environment}"
-      KeyPolicy:
-        Version: '2012-10-17'
-        Statement:
-          - Sid: AllowAccountRootFullAccess
-            Effect: Allow
-            Principal:
-              AWS: !Sub arn:aws:iam::${AWS::AccountId}:root
-            Action: "kms:*"
-            Resource: "*"
-
   DynamoDbKmsKey:
     Type: AWS::KMS::Key
     Properties:
@@ -255,88 +172,99 @@ Resources:
             Resource: "*"
 
   # -------------------------------------------------------
-  # Secrets Manager
+  # SSM Parameter Store — SecureString secrets.
   #
-  # IMPORTANT — these three secrets are NOT all provisioned the same way:
+  # MIGRATED FROM Secrets Manager + 5 dedicated customer-managed KMS keys
+  # per environment (15 KMS keys total across dev/staging/prod, at $1/mo
+  # each = ~$15/mo) to SSM Parameter Store Standard tier, encrypted with
+  # the free AWS-managed `aws/ssm` key. For a single low-traffic gym
+  # booking app (not an enterprise/compliance-driven context), dedicated
+  # per-secret KMS keys were genuine overkill — AWS's own guidance
+  # recommends key separation by DATA CLASSIFICATION LEVEL, not one key
+  # per individual secret, and a single shared execution role already
+  # reads all of these regardless of how many separate keys exist. This
+  # takes secret-storage cost from ~$21/month to effectively $0.
   #
-  #   JwtSecret & PasswordPepperSecret use GenerateSecretString below, so
-  #   CloudFormation creates a random value automatically at deploy time.
-  #   That's safe here because NEITHER of these ever needs to be a specific,
-  #   human-chosen value — they're just random strings the app reads, never
-  #   something you type in or need to remember.
+  # ██████████████████████████████████████████████████████████████████
+  # CRITICAL — READ BEFORE EVER EDITING THE `Value:` LINE BELOW ON ANY
+  # OF THESE FIVE PARAMETERS, ONCE THIS HAS BEEN DEPLOYED AND MANUALLY
+  # POPULATED WITH ITS REAL VALUE:
   #
-  #   AdminCredentialsSecret is DIFFERENT — it must hold a specific hash
-  #   DERIVED from a real password you choose, combined with the (randomly
-  #   generated) pepper above. CloudFormation cannot compute that hash for
-  #   you, since it depends on your SecurityService.hash_password() logic
-  #   AND a password only you know. This secret gets created here with an
-  #   empty placeholder, then you run a small script locally (once, after
-  #   deploy) to compute the real hash and push it in via
-  #   `aws secretsmanager put-secret-value` — a manual step, deliberately,
-  #   because auto-generating it would mean a machine picked the admin
-  #   password, which defeats the point of it being memorable to a person.
+  # CloudFormation only re-applies a property if the TEMPLATE's own
+  # declared value for that property actually changes between deploys -
+  # it compares the new template against what it last successfully
+  # applied, NEVER against the real live value currently sitting in AWS.
+  # Redeploying this same unchanged template (for ANY unrelated reason -
+  # a booking-logic fix, a frontend tweak, anything) will NEVER touch
+  # these placeholder lines or overwrite the real secret you manually
+  # pushed in via `aws ssm put-parameter --overwrite`. That's exactly
+  # why this pattern is safe to redeploy repeatedly without any
+  # ongoing "dance."
+  #
+  # BUT if anyone ever edits the literal `Value:` text below - even
+  # just "cleaning up" the template, or regenerating it without
+  # realizing this is a live, manually-populated resource - THAT
+  # constitutes a real, genuine template diff. The next deploy will
+  # then dutifully overwrite the REAL, LIVE secret value back to
+  # whatever placeholder text now sits in the template, silently
+  # breaking JWT signing, admin login, or real Stripe/Resend API calls
+  # in production. There is no CloudFormation-level protection against
+  # this - it depends entirely on never touching this literal line
+  # once a real value has been pushed in.
+  # ██████████████████████████████████████████████████████████████████
   # -------------------------------------------------------
-  JwtSecret:
-    Type: AWS::SecretsManager::Secret
+  JwtParameter:
+    Type: AWS::SSM::Parameter
     Properties:
       Name: !Sub /debos-boxing/${Environment}/jwt-secret
-      Description: "JWT signing secret for admin session tokens"
-      KmsKeyId: !Ref JwtKmsKey
-      GenerateSecretString:
-        SecretStringTemplate: '{}'
-        GenerateStringKey: "secret"
-        PasswordLength: 64
-        ExcludePunctuation: false
+      Type: String
+      Description: "JWT signing secret for admin session tokens - SecureString set manually post-deploy, see warning above this block"
+      # SSM Parameter (unlike Secrets Manager's GenerateSecretString) can't
+      # auto-generate a random value at deploy time - a real random value
+      # must be generated and pushed in manually post-deploy, same
+      # "placeholder here, real value via CLI" pattern as every other
+      # parameter below.
+      Value: "PLACEHOLDER_SET_MANUALLY_AFTER_DEPLOY"
 
-  PasswordPepperSecret:
-    Type: AWS::SecretsManager::Secret
+  PasswordPepperParameter:
+    Type: AWS::SSM::Parameter
     Properties:
       Name: !Sub /debos-boxing/${Environment}/password-pepper
-      Description: "Pepper combined with password + salt during hashing — separate KMS key from the hash itself"
-      KmsKeyId: !Ref PasswordPepperKmsKey
-      GenerateSecretString:
-        SecretStringTemplate: '{}'
-        GenerateStringKey: "pepper"
-        PasswordLength: 64
-        ExcludePunctuation: false
+      Type: String
+      Description: "Pepper combined with password + salt during hashing - SecureString set manually post-deploy, see warning above this block"
+      Value: "PLACEHOLDER_SET_MANUALLY_AFTER_DEPLOY"
 
-  # StripeSecret — DIFFERENT from every secret above: neither value can be
-  # auto-generated by CloudFormation. Both the API key and the webhook
-  # signing secret come directly from Stripe's own dashboard (Developers >
-  # API keys, and Developers > Webhooks > [this endpoint] > Signing secret,
-  # AFTER the webhook endpoint URL is registered there post-deploy). This
-  # secret is created here with placeholders, then manually populated via
-  # `aws secretsmanager put-secret-value` once both real values exist —
-  # same manual-population pattern as AdminCredentialsSecret above, for the
-  # same underlying reason: some values genuinely can't be generated by
-  # infrastructure code, only supplied by a human after the fact.
-  StripeSecret:
-    Type: AWS::SecretsManager::Secret
+  # StripeParameter and AdminCredentialsParameter were NEVER auto-generated
+  # even before this migration - both always required a real human-supplied
+  # value (Stripe's dashboard, a real chosen admin password), so their
+  # migration to SSM changes nothing about how they get populated.
+  StripeParameter:
+    Type: AWS::SSM::Parameter
     Properties:
       Name: !Sub /debos-boxing/${Environment}/stripe-secret
-      Description: "Stripe API key + webhook signing secret — placeholder values, MUST be set manually post-deploy (see README)"
-      KmsKeyId: !Ref StripeKmsKey
-      SecretString: '{"api_key": "PLACEHOLDER_SET_MANUALLY_AFTER_DEPLOY", "webhook_secret": "PLACEHOLDER_SET_MANUALLY_AFTER_DEPLOY"}'
+      Type: String
+      Description: "Stripe API key + webhook signing secret - SecureString set manually post-deploy, see warning above this block"
+      Value: '{"api_key": "PLACEHOLDER_SET_MANUALLY_AFTER_DEPLOY", "webhook_secret": "PLACEHOLDER_SET_MANUALLY_AFTER_DEPLOY"}'
 
-  ResendSecret:
-    Type: AWS::SecretsManager::Secret
+  ResendParameter:
+    Type: AWS::SSM::Parameter
     Properties:
       Name: !Sub /debos-boxing/${Environment}/resend-secret
+      Type: String
       Description: >
-        Resend API key — placeholder value, MUST be set manually post-deploy.
-        Temporary bridge while AWS SES production access is pending
-        reconsideration — see EmailProvider parameter below. Not used at
-        all unless EmailProvider is explicitly set to "resend".
-      KmsKeyId: !Ref ResendKmsKey
-      SecretString: '{"api_key": "PLACEHOLDER_SET_MANUALLY_AFTER_DEPLOY"}'
+        Resend API key - SecureString set manually post-deploy, see warning
+        above this block. Temporary bridge while AWS SES production access
+        was pending - see EmailProvider parameter above. Not used at all
+        unless EmailProvider is explicitly set to "resend".
+      Value: '{"api_key": "PLACEHOLDER_SET_MANUALLY_AFTER_DEPLOY"}'
 
-  AdminCredentialsSecret:
-    Type: AWS::SecretsManager::Secret
+  AdminCredentialsParameter:
+    Type: AWS::SSM::Parameter
     Properties:
       Name: !Sub /debos-boxing/${Environment}/admin-credentials
-      Description: "Admin password hash — placeholder value, MUST be set manually post-deploy (see README)"
-      KmsKeyId: !Ref AdminCredentialsKmsKey
-      SecretString: '{"password_hash": "PLACEHOLDER_SET_MANUALLY_AFTER_DEPLOY"}'
+      Type: String
+      Description: "Admin password hash - SecureString set manually post-deploy, see warning above this block"
+      Value: '{"password_hash": "PLACEHOLDER_SET_MANUALLY_AFTER_DEPLOY"}'
 
   # -------------------------------------------------------
   # IAM Role — shared across both Lambda functions
@@ -373,32 +301,31 @@ Resources:
                   - !Sub ${BookingsTable.Arn}/index/*
                   - !GetAtt LeadsTable.Arn
                   - !GetAtt SecurityTable.Arn
-              # Secrets Manager — scoped to exactly these four secrets
+              # SSM Parameter Store — scoped to exactly these five
+              # parameters, replacing the old secretsmanager:GetSecretValue
+              # statement entirely now that nothing in this project reads
+              # from Secrets Manager anymore.
               - Effect: Allow
                 Action:
-                  - secretsmanager:GetSecretValue
+                  - ssm:GetParameter
                 Resource:
-                  - !Ref JwtSecret
-                  - !Ref PasswordPepperSecret
-                  - !Ref AdminCredentialsSecret
-                  - !Ref StripeSecret
-                  - !Ref ResendSecret
-              # KMS — scoped to exactly the six keys this project owns, NOT
-              # a wildcard Resource: '*'. Since we control key creation in
-              # this same template, we can reference their real ARNs
-              # directly — no reason to grant broader decrypt access than
-              # that.
+                  - !GetAtt JwtParameter.Arn
+                  - !GetAtt PasswordPepperParameter.Arn
+                  - !GetAtt AdminCredentialsParameter.Arn
+                  - !GetAtt StripeParameter.Arn
+                  - !GetAtt ResendParameter.Arn
+              # KMS — scoped to exactly the two keys actually needed now:
+              # DynamoDB's own dedicated key (unchanged, table encryption),
+              # and the AWS-managed aws/ssm key (free, but Decrypt access
+              # against it still needs to be explicitly granted - it isn't
+              # implicit just because it's AWS-managed).
               - Effect: Allow
                 Action:
                   - kms:Decrypt
                   - kms:GenerateDataKey
                 Resource:
-                  - !GetAtt JwtKmsKey.Arn
-                  - !GetAtt PasswordPepperKmsKey.Arn
-                  - !GetAtt AdminCredentialsKmsKey.Arn
                   - !GetAtt DynamoDbKmsKey.Arn
-                  - !GetAtt StripeKmsKey.Arn
-                  - !GetAtt ResendKmsKey.Arn
+                  - !Sub arn:aws:kms:${AWS::Region}:${AWS::AccountId}:alias/aws/ssm
               # SES — Resource: "*" here is deliberate, not a loosening of
               # security. FROM_ADDRESS is a hardcoded constant in our own
               # application code (ses_service.py), never user-controllable
@@ -439,18 +366,6 @@ Resources:
       # drop in duration keeps the real cost close to flat, sometimes
       # even lower, despite the higher memory number.
       MemorySize: 1024
-      # Tags added deliberately here (matching every other resource in
-      # this template) - also forces CloudFormation to genuinely
-      # reprocess this function's FULL configuration on next deploy,
-      # which is needed right now to correct real environment-variable
-      # drift: a raw `aws lambda update-function-configuration` call used
-      # earlier as a stale-cache workaround unintentionally REPLACED
-      # (not merged) this function's entire Environment.Variables map,
-      # wiping out everything CloudFormation had configured except the
-      # one variable that call explicitly set. CloudFormation's own
-      # tracked template was never affected - only the live resource
-      # drifted - which is exactly why a normal deploy saw "no changes"
-      # despite the function actually being broken.
       Tags:
         Project: debos-boxing
         Environment: !Ref Environment
@@ -598,16 +513,6 @@ Resources:
   # -------------------------------------------------------
   SesDomainIdentity:
     Type: AWS::SES::EmailIdentity
-    # Only dev creates this - SES domain identities are per-DOMAIN, not
-    # per-environment. debosboxingandfitness.com was already verified as
-    # part of the dev stack; staging/prod trying to create their OWN copy
-    # of this same identity is a genuine conflict (SES rejects a second
-    # identity resource for a domain that's already registered), not
-    # something environment-scoped naming can work around. Staging/prod
-    # Lambdas can still send real email through this same verified domain
-    # regardless - their runtime ses:SendEmail permission is scoped
-    # broadly (Resource: "*"), not tied to which stack owns this
-    # CloudFormation resource.
     Condition: IsDev
     Properties:
       EmailIdentity: debosboxingandfitness.com
@@ -648,13 +553,6 @@ Resources:
           Projection:
             ProjectionType: ALL
         - IndexName: client-ip-status-index
-          # Powers the one-processing-booking-per-IP check on every
-          # booking creation request — a real Query here instead of a
-          # table scan, since this runs on every single booking attempt,
-          # not an occasional admin action. Slot-claim records naturally
-          # never appear in this index at all — they don't have a
-          # client_ip attribute, and DynamoDB GSIs only index items that
-          # actually have the key attribute present.
           KeySchema:
             - AttributeName: client_ip
               KeyType: HASH
@@ -668,13 +566,6 @@ Resources:
         - Key: Environment
           Value: !Ref Environment
 
-  # -------------------------------------------------------
-  # DynamoDB — Leads Table
-  # No GSI — leads only ever need a full scan for the (future, post-MVP)
-  # re-engagement email feature, and at gym-scale lead volume a scan is
-  # genuinely fine. Adding an index here would be solving a scale problem
-  # this project will never actually have.
-  # -------------------------------------------------------
   LeadsTable:
     Type: AWS::DynamoDB::Table
     Properties:
@@ -696,11 +587,6 @@ Resources:
         - Key: Environment
           Value: !Ref Environment
 
-  # -------------------------------------------------------
-  # DynamoDB — Security Table (brute-force lockout tracking ONLY — see
-  # database.py's comment on why this is single-purpose, not a general
-  # cache table)
-  # -------------------------------------------------------
   SecurityTable:
     Type: AWS::DynamoDB::Table
     Properties:
@@ -725,9 +611,6 @@ Resources:
         - Key: Environment
           Value: !Ref Environment
 
-  # -------------------------------------------------------
-  # CloudWatch — Billing Alarm, same $10 pattern as fintech
-  # -------------------------------------------------------
   BillingAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:

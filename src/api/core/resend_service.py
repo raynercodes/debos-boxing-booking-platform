@@ -16,6 +16,9 @@ know or care which.
 Uses urllib directly rather than the resend SDK, deliberately — avoids
 adding a new dependency to requirements.txt for something explicitly
 meant to be short-lived, not a permanent architectural choice.
+
+MIGRATED from Secrets Manager to SSM Parameter Store (see security.py's
+module docstring for the full cost/security reasoning).
 """
 
 import os
@@ -49,10 +52,10 @@ class ResendService:
         lifetime — same L1-caching pattern used for every other secret
         in this project."""
         if self._api_key is None:
-            secrets_client = boto3.client("secretsmanager")
+            ssm_client = boto3.client("ssm")
             secret_path = os.environ["RESEND_SECRET_PATH"]
-            response = secrets_client.get_secret_value(SecretId=secret_path)
-            self._api_key = json.loads(response["SecretString"])["api_key"]
+            response = ssm_client.get_parameter(Name=secret_path, WithDecryption=True)
+            self._api_key = json.loads(response["Parameter"]["Value"])["api_key"]
         return self._api_key
 
     def _send(self, to_address: str, subject: str, body_text: str) -> None:
@@ -90,34 +93,15 @@ class ResendService:
                 response.read()
             logger.info("Email sent via Resend to %s: %s", to_address, subject)
         except urllib.error.HTTPError as exc:
-            # Specifically captures the RESPONSE BODY, not just the status
-            # line - urllib's HTTPError carries the real, detailed error
-            # message Resend actually sent back, which the status line
-            # alone ("HTTP Error 403: Forbidden") never shows. This is
-            # exactly the piece needed to diagnose WHY a request was
-            # rejected, rather than just knowing THAT it was.
             error_body = exc.read().decode("utf-8", errors="replace")
             logger.error(
                 "Failed to send email via Resend to %s (%s): HTTP %s - %s",
                 to_address, subject, exc.code, error_body, exc_info=True,
             )
         except (urllib.error.URLError, KeyError, ValueError) as exc:
-            # Swallowed deliberately, matching ses_service.py's own
-            # reasoning: a failed notification email should never roll
-            # back or fail an action (booking/cancellation) that already
-            # completed successfully.
             logger.error("Failed to send email via Resend to %s (%s): %s", to_address, subject, exc, exc_info=True)
 
     def send_checkout_link(self, booking: dict, checkout_url: str) -> None:
-        """Sent immediately when checkout STARTS, not when it confirms —
-        the recovery path for someone who gets redirected to Stripe, then
-        closes the tab, loses connection, or just gets distracted before
-        paying. Without this, that booking sits stuck in 'processing' for
-        the full 30-minute expiry with zero way back in, even though
-        Stripe's own session URL is still perfectly valid and reusable
-        the whole time. Re-sending them the exact same URL costs nothing
-        and creates no duplicate booking or charge risk — it's the same
-        checkout session, just given a second entry point."""
         subject = f"Complete your booking with {EMAIL_SIGNATURE}"
         body = (
             f"Hi {booking['name']},\n\n"

@@ -84,7 +84,7 @@ async def admin_login(request: AdminLoginRequest, client_ip: str = Depends(get_c
         FailedLoginTracker(get_db_service()).record_attempt(client_ip)
         raise InvalidCredentialsError("Invalid credentials")
 
-    logger.info("Admin login successful")
+    logger.info(f"Admin login successful from IP: {client_ip}")
     lockout.clear_attempts()
     return AdminLoginResponse(access_token=security.create_jwt())
 

@@ -70,10 +70,18 @@ def aws_test_env(monkeypatch):
 @pytest.fixture
 def mock_aws_infra(aws_test_env):
     """Spins up mocked DynamoDB tables (matching infrastructure/template.yaml's
-    real schema) and mocked Secrets Manager entries, scoped to a single test
-    via moto's context manager. Anything using get_db_service()/
+    real schema) and mocked SSM Parameter Store entries, scoped to a single
+    test via moto's context manager. Anything using get_db_service()/
     get_security_service() during this fixture's lifetime talks to this
-    mocked infra, not real AWS."""
+    mocked infra, not real AWS.
+
+    MIGRATED from mocked Secrets Manager to mocked SSM Parameter Store —
+    matches the same production migration in security.py/stripe_service.py/
+    resend_service.py (Secrets Manager + per-secret KMS keys -> SSM
+    Parameter Store + the free aws/ssm key). put_parameter with
+    Type="SecureString" is moto's real, supported way of mocking this -
+    not a simplification, genuinely the same call shape production code
+    makes."""
     with mock_aws():
         ddb = boto3.resource("dynamodb", region_name="us-east-1")
 
@@ -122,33 +130,37 @@ def mock_aws_infra(aws_test_env):
             BillingMode="PAY_PER_REQUEST",
         )
 
-        sm = boto3.client("secretsmanager", region_name="us-east-1")
-        sm.create_secret(
+        ssm = boto3.client("ssm", region_name="us-east-1")
+        ssm.put_parameter(
             Name=TEST_ENV_VARS["JWT_SECRET_PATH"],
-            SecretString='{"secret": "test-jwt-secret-not-a-real-value"}',
+            Value='{"secret": "test-jwt-secret-not-a-real-value"}',
+            Type="SecureString",
         )
-        sm.create_secret(
+        ssm.put_parameter(
             Name=TEST_ENV_VARS["PASSWORD_PEPPER_PATH"],
-            SecretString='{"pepper": "test-pepper-not-a-real-value"}',
+            Value='{"pepper": "test-pepper-not-a-real-value"}',
+            Type="SecureString",
         )
-        sm.create_secret(
+        ssm.put_parameter(
             Name=TEST_ENV_VARS["STRIPE_SECRET_PATH"],
-            SecretString='{"api_key": "sk_test_not_a_real_key", "webhook_secret": "whsec_not_a_real_secret"}',
+            Value='{"api_key": "sk_test_not_a_real_key", "webhook_secret": "whsec_not_a_real_secret"}',
+            Type="SecureString",
         )
 
-        # Admin credentials secret needs a REAL computed hash, not a
+        # Admin credentials parameter needs a REAL computed hash, not a
         # placeholder — otherwise no test could ever exercise a genuinely
         # correct /auth/login. The hash must be computed AFTER the pepper
-        # secret above exists (hash_password reads the pepper), and the
+        # parameter above exists (hash_password reads the pepper), and the
         # singleton must be reset first so the SecurityService instance
-        # used here actually talks to the freshly-mocked Secrets Manager
-        # rather than any stale prior instance.
+        # used here actually talks to the freshly-mocked SSM rather than
+        # any stale prior instance.
         security_module._security_service = None
         security_service = security_module.get_security_service()
         admin_password_hash = security_service.hash_password(TEST_ADMIN_PASSWORD)
-        sm.create_secret(
+        ssm.put_parameter(
             Name=TEST_ENV_VARS["ADMIN_CREDENTIALS_PATH"],
-            SecretString=json.dumps({"password_hash": admin_password_hash}),
+            Value=json.dumps({"password_hash": admin_password_hash}),
+            Type="SecureString",
         )
         # Reset again so actual test code gets a clean instance too, rather
         # than reusing internal state left over from computing the hash above.

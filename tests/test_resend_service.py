@@ -28,16 +28,27 @@ def _mock_urlopen_response():
     return mock_response
 
 
+def _mock_ssm_client():
+    """Matches the real SSM get_parameter response shape
+    ({"Parameter": {"Value": "..."}}) - NOT Secrets Manager's shape
+    ({"SecretString": "..."}). Getting this response shape wrong is
+    exactly what caused a real TypeError when this project migrated from
+    Secrets Manager to SSM Parameter Store - the mock kept the OLD shape
+    while the real code moved to the new one."""
+    mock_client = MagicMock()
+    mock_client.get_parameter.return_value = {
+        "Parameter": {"Value": '{"api_key": "re_test_fake_key"}'}
+    }
+    return mock_client
+
+
 def test_send_booking_confirmation_posts_to_resend(monkeypatch):
     monkeypatch.setenv("RESEND_SECRET_PATH", "fake-resend-secret-path")
     service = ResendService()
 
-    mock_secrets_client = MagicMock()
-    mock_secrets_client.get_secret_value.return_value = {
-        "SecretString": '{"api_key": "re_test_fake_key"}'
-    }
+    mock_ssm_client = _mock_ssm_client()
 
-    with patch("boto3.client", return_value=mock_secrets_client), \
+    with patch("boto3.client", return_value=mock_ssm_client), \
          patch("urllib.request.urlopen", return_value=_mock_urlopen_response()) as mock_urlopen:
         service.send_booking_confirmation(BOOKING)
 
@@ -45,9 +56,6 @@ def test_send_booking_confirmation_posts_to_resend(monkeypatch):
     sent_request = mock_urlopen.call_args[0][0]
     assert sent_request.full_url == "https://api.resend.com/emails"
     assert sent_request.get_header("Authorization") == "Bearer re_test_fake_key"
-    # Locks in the actual fix for the real Cloudflare 1010 block found in
-    # production — a real User-Agent, not urllib's easily-fingerprinted
-    # default, which Cloudflare's Browser Integrity Check was flagging.
     assert sent_request.get_header("User-agent") == "DebosBoxingBookingPlatform/1.0"
     sent_body = json.loads(sent_request.data)
     assert sent_body["to"] == "client@example.com"
@@ -60,12 +68,9 @@ def test_api_key_cached_across_multiple_sends(monkeypatch):
     monkeypatch.setenv("RESEND_SECRET_PATH", "fake-resend-secret-path")
     service = ResendService()
 
-    mock_secrets_client = MagicMock()
-    mock_secrets_client.get_secret_value.return_value = {
-        "SecretString": '{"api_key": "re_test_fake_key"}'
-    }
+    mock_ssm_client = _mock_ssm_client()
 
-    with patch("boto3.client", return_value=mock_secrets_client) as mock_boto3_client, \
+    with patch("boto3.client", return_value=mock_ssm_client) as mock_boto3_client, \
          patch("urllib.request.urlopen", return_value=_mock_urlopen_response()):
         service.send_booking_confirmation(BOOKING)
         service.send_booking_confirmation(BOOKING)
@@ -79,12 +84,9 @@ def test_send_failure_is_swallowed_not_raised(monkeypatch):
     monkeypatch.setenv("RESEND_SECRET_PATH", "fake-resend-secret-path")
     service = ResendService()
 
-    mock_secrets_client = MagicMock()
-    mock_secrets_client.get_secret_value.return_value = {
-        "SecretString": '{"api_key": "re_test_fake_key"}'
-    }
+    mock_ssm_client = _mock_ssm_client()
 
-    with patch("boto3.client", return_value=mock_secrets_client), \
+    with patch("boto3.client", return_value=mock_ssm_client), \
          patch("urllib.request.urlopen", side_effect=urllib.error.URLError("connection failed")):
         service.send_booking_confirmation(BOOKING)  # should not raise
 
@@ -98,10 +100,7 @@ def test_http_error_logs_the_actual_response_body(monkeypatch, caplog):
     monkeypatch.setenv("RESEND_SECRET_PATH", "fake-resend-secret-path")
     service = ResendService()
 
-    mock_secrets_client = MagicMock()
-    mock_secrets_client.get_secret_value.return_value = {
-        "SecretString": '{"api_key": "re_test_fake_key"}'
-    }
+    mock_ssm_client = _mock_ssm_client()
 
     mock_fp = MagicMock()
     mock_fp.read.return_value = b'{"message": "This domain is not verified", "name": "validation_error"}'
@@ -109,7 +108,7 @@ def test_http_error_logs_the_actual_response_body(monkeypatch, caplog):
         url="https://api.resend.com/emails", code=403, msg="Forbidden", hdrs=None, fp=mock_fp,
     )
 
-    with patch("boto3.client", return_value=mock_secrets_client), \
+    with patch("boto3.client", return_value=mock_ssm_client), \
          patch("urllib.request.urlopen", side_effect=http_error):
         service.send_booking_confirmation(BOOKING)  # should not raise
 
@@ -131,8 +130,6 @@ def test_cancellation_notice_includes_refund_info():
 def test_new_booking_notification_uses_friendly_type_name_not_raw_enum():
     """Same fix as ses_service.py - the raw database value should never
     leak into a customer/admin-facing email."""
-    from unittest.mock import patch
-
     service = ResendService()
     with patch.object(service, "_send") as mock_send:
         service.send_new_booking_notification(BOOKING, admin_email="debo@example.com")
